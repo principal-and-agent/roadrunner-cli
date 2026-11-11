@@ -214,6 +214,46 @@ class TestFinalizeCurrent:
 
         assert data["tasks_completed"] == ["T-1", "T-2"]
 
+    def test_corrupt_archive_is_skipped_not_fatal(self, tmp_session_root, tmp_path):
+        import gzip
+
+        path = rr_session.open_session()
+        logs = tmp_path / "logs"
+        (logs / "trace.jsonl.20990101T000000_000000Z.gz").write_bytes(
+            b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03garbage-not-deflate"
+        )
+        (logs / "trace.jsonl.20990101T000001_000000Z.gz").write_bytes(
+            gzip.compress(b"\xff\xfe\xfa not utf-8\n")
+        )
+        _write_trace(tmp_path, [{"ts": _ts(1), "event": "task_complete", "task_id": "T-1"}])
+        rr_session.finalize_current()
+        data = json.loads(path.read_text())
+
+        assert data["tasks_completed"] == ["T-1"]
+
+    def test_archive_older_than_session_is_not_replayed(
+        self, tmp_session_root, tmp_path, monkeypatch
+    ):
+        import gzip
+        import os as _os
+
+        logs = tmp_path / "logs"
+        old = logs / "trace.jsonl.20000101T000000_000000Z.gz"
+        with gzip.open(old, "wt") as f:
+            f.write(json.dumps({"ts": _ts(1), "event": "task_complete", "task_id": "X"}) + "\n")
+        _os.utime(old, (946684800, 946684800))  # 2000-01-01
+        path = rr_session.open_session()
+        opened: list[str] = []
+        real = rr_session._read_file_events
+        monkeypatch.setattr(
+            rr_session, "_read_file_events", lambda p: opened.append(p.name) or real(p)
+        )
+        _write_trace(tmp_path, [])
+        rr_session.finalize_current()
+        json.loads(path.read_text())
+
+        assert old.name not in opened
+
     def test_retry_counter(self, tmp_session_root, tmp_path):
         rr_session.open_session()
         events = [

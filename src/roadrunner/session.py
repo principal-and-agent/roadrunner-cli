@@ -37,6 +37,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import zlib
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -143,7 +144,25 @@ def _read_file_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
-def _read_trace_events(max_passes: int = 3) -> list[dict[str, Any]]:
+def _modified_before(path: Path, cutoff_iso: str) -> bool:
+    """True if ``path`` was last written before ``cutoff_iso``.
+
+    An archive untouched since before the session started cannot hold any of
+    its events, so it is never decompressed. This bounds replay to the
+    rotations that happened during the session.
+    """
+    if not cutoff_iso:
+        return False
+    try:
+        cutoff = datetime.fromisoformat(cutoff_iso).timestamp()
+        return path.stat().st_mtime < cutoff
+    except (OSError, ValueError):
+        return False
+
+
+def _read_trace_events(
+    max_passes: int = 3, since_iso: str = ""
+) -> list[dict[str, Any]]:
     """Read the trace (rotated archives plus live file) into a list of dicts.
 
     If a file disappears between discovery and opening, or the set of trace
@@ -158,12 +177,16 @@ def _read_trace_events(max_passes: int = 3) -> list[dict[str, Any]]:
         vanished = False
         files = _trace_files()
         for path in files:
+            if path != TRACE_LOG and _modified_before(path, since_iso):
+                continue
             try:
                 out.extend(_read_file_events(path))
             except FileNotFoundError:
                 vanished = True
                 break
-            except (OSError, EOFError):
+            except (OSError, EOFError, zlib.error, UnicodeDecodeError):
+                # A corrupt or undecodable archive is dropped whole rather
+                # than aborting the summary (and the stop hook with it).
                 continue
         # A rotation that renamed and recreated the live file while we read
         # leaves every open succeeding but adds a new archive; detect that by
@@ -263,7 +286,7 @@ def finalize_current() -> Path | None:
     started_at = summary.get("started_at", "")
     ended_at = _now()
 
-    events = _events_after(_read_trace_events(), started_at)
+    events = _events_after(_read_trace_events(since_iso=started_at), started_at)
 
     completed: list[str] = []
     blocked: list[str] = []

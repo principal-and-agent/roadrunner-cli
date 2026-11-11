@@ -1867,7 +1867,7 @@ def cmd_check_stop(args: argparse.Namespace) -> None:
                 active = get_task(tasks_for_trace, active_task_id)
                 if active:
                     active_model = active.get("model")
-            except (FileNotFoundError, ValueError):
+            except (OSError, ValueError):
                 # Tasks file unreadable mid-loop is already handled later;
                 # the trace just omits the field rather than crashing.
                 pass
