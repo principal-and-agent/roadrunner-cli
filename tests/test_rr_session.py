@@ -154,6 +154,37 @@ class TestFinalizeCurrent:
         assert data["tasks_completed"] == ["T-1", "T-2"]
         assert data["validation_runs"] == 1
 
+    def test_plain_twin_vanishing_mid_read_falls_back_to_gz(
+        self, tmp_session_root, tmp_path, monkeypatch
+    ):
+        """Rotation unlinks the plain file after discovery: read the .gz instead."""
+        import gzip
+
+        path = rr_session.open_session()
+        ev = {"ts": _ts(1), "event": "task_complete", "task_id": "T-1"}
+        logs = tmp_path / "logs"
+        plain = logs / "trace.jsonl.20990101T000000_000000Z"
+        plain.write_text(json.dumps(ev) + "\n")
+        with gzip.open(logs / (plain.name + ".gz"), "wt") as f:
+            f.write(json.dumps(ev) + "\n")
+        _write_trace(tmp_path, [])
+
+        real = rr_session._trace_files
+        calls = {"n": 0}
+
+        def racing():
+            files = real()
+            calls["n"] += 1
+            if calls["n"] == 1:
+                plain.unlink()  # rotation finishes between listing and opening
+            return files
+
+        monkeypatch.setattr(rr_session, "_trace_files", racing)
+        rr_session.finalize_current()
+        data = json.loads(path.read_text())
+
+        assert data["tasks_completed"] == ["T-1"]
+
     def test_retry_counter(self, tmp_session_root, tmp_path):
         rr_session.open_session()
         events = [

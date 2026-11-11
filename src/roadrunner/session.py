@@ -125,25 +125,46 @@ def _trace_files() -> list[Path]:
     return rotated + live
 
 
-def _read_trace_events() -> list[dict[str, Any]]:
-    """Read the trace (rotated archives plus live file) into a list of dicts."""
+def _read_file_events(path: Path) -> list[dict[str, Any]]:
+    """Parse one trace file. Raises FileNotFoundError if it vanished."""
+    opener = gzip.open if path.suffix == ".gz" else open
+    events: list[dict[str, Any]] = []
+    with opener(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                # A partially-written line at tail is the only realistic
+                # cause; skip it rather than crash the summary.
+                continue
+    return events
+
+
+def _read_trace_events(max_passes: int = 3) -> list[dict[str, Any]]:
+    """Read the trace (rotated archives plus live file) into a list of dicts.
+
+    If a file disappears between discovery and opening, a rotation moved it
+    mid-read; rediscover and start over so its events are neither dropped nor
+    double counted. A file that fails to parse (e.g. a truncated .gz with no
+    plain twin) contributes nothing rather than a partial prefix.
+    """
     out: list[dict[str, Any]] = []
-    for path in _trace_files():
-        opener = gzip.open if path.suffix == ".gz" else open
-        try:
-            with opener(path, "rt", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        out.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        # A partially-written line at tail is the only realistic
-                        # cause; skip it rather than crash the summary.
-                        continue
-        except (OSError, EOFError):
-            continue
+    for _ in range(max_passes):
+        out = []
+        vanished = False
+        for path in _trace_files():
+            try:
+                out.extend(_read_file_events(path))
+            except FileNotFoundError:
+                vanished = True
+                break
+            except (OSError, EOFError):
+                continue
+        if not vanished:
+            return out
     return out
 
 
