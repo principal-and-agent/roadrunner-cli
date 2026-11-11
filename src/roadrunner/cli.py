@@ -1800,7 +1800,7 @@ def cmd_check_stop(args: argparse.Namespace) -> None:
     def _finalize_session_quiet() -> None:
         try:
             rr_session.finalize_current()
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 - observability must never block a halt
             print(f"[roadrunner] session finalize failed: {exc}", file=sys.stderr)
 
     # Serialize concurrent Stop-hook fires so the read→increment→write span in the
@@ -1867,7 +1867,7 @@ def cmd_check_stop(args: argparse.Namespace) -> None:
                 active = get_task(tasks_for_trace, active_task_id)
                 if active:
                     active_model = active.get("model")
-            except (OSError, ValueError):
+            except (OSError, ValueError, TypeError, AttributeError):
                 # Tasks file unreadable mid-loop is already handled later;
                 # the trace just omits the field rather than crashing.
                 pass
@@ -1936,7 +1936,9 @@ def cmd_check_stop(args: argparse.Namespace) -> None:
 
         try:
             tasks = load_tasks()
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, TypeError, AttributeError) as exc:
+            # TypeError/AttributeError: structurally invalid entries (e.g.
+            # ``tasks: [null]``) that the schema validator does not reject cleanly.
             # A broken queue cannot drive decisions. Halt in a controlled way: structured
             # JSON, exit 0, an actionable instruction, and never a completion record.
             _finalize_session_quiet()

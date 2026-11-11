@@ -126,21 +126,52 @@ def _trace_files() -> list[Path]:
     return rotated + live
 
 
-def _read_file_events(path: Path) -> list[dict[str, Any]]:
-    """Parse one trace file. Raises FileNotFoundError if it vanished."""
+# Replay bounds: a trace line is a small JSON record and a session spans at
+# most a few 10 MB rotations, so these only bite on corrupt or hostile input.
+MAX_TRACE_LINE_BYTES = 1024 * 1024
+MAX_REPLAY_BYTES = 256 * 1024 * 1024
+
+
+class _ReplayBudget:
+    def __init__(self, limit: int = MAX_REPLAY_BYTES) -> None:
+        self.remaining = limit
+
+
+def _read_file_events(
+    path: Path, budget: _ReplayBudget | None = None
+) -> list[dict[str, Any]]:
+    """Parse one trace file. Raises FileNotFoundError if it vanished.
+
+    Lines over MAX_TRACE_LINE_BYTES are discarded without being held whole,
+    and reading stops once the shared replay budget is spent. Records that are
+    not objects with a string ``ts`` are skipped.
+    """
+    budget = budget or _ReplayBudget()
     opener = gzip.open if path.suffix == ".gz" else open
     events: list[dict[str, Any]] = []
     with opener(path, "rt", encoding="utf-8") as f:
-        for line in f:
+        while budget.remaining > 0:
+            line = f.readline(MAX_TRACE_LINE_BYTES + 1)
+            if not line:
+                break
+            budget.remaining -= len(line)
+            if len(line) > MAX_TRACE_LINE_BYTES:
+                # Oversized line: drain the rest of it in bounded chunks.
+                while line and not line.endswith("\n") and budget.remaining > 0:
+                    line = f.readline(MAX_TRACE_LINE_BYTES)
+                    budget.remaining -= len(line)
+                continue
             line = line.strip()
             if not line:
                 continue
             try:
-                events.append(json.loads(line))
+                record = json.loads(line)
             except json.JSONDecodeError:
                 # A partially-written line at tail is the only realistic
                 # cause; skip it rather than crash the summary.
                 continue
+            if isinstance(record, dict) and isinstance(record.get("ts", ""), str):
+                events.append(record)
     return events
 
 
@@ -175,12 +206,13 @@ def _read_trace_events(
     for _ in range(max_passes):
         out = []
         vanished = False
+        budget = _ReplayBudget()
         files = _trace_files()
         for path in files:
             if path != TRACE_LOG and _modified_before(path, since_iso):
                 continue
             try:
-                out.extend(_read_file_events(path))
+                out.extend(_read_file_events(path, budget))
             except FileNotFoundError:
                 vanished = True
                 break

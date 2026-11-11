@@ -76,6 +76,14 @@ class TestStopHook:
         assert output["continue"] is False
         assert "tasks.yaml" in output["stopReason"]
 
+    def test_structurally_invalid_tasks_halts_cleanly(self):
+        (PROJECT_ROOT / "tasks" / "tasks.yaml").write_text("tasks: [null]\n")
+        result = run_hook("stop_hook.sh", {"stop_hook_active": False, "last_assistant_message": "working"})
+        assert result.returncode == 0, result.stderr
+        assert "Traceback" not in result.stderr
+        output = json.loads(result.stdout)
+        assert output["continue"] is False
+
     def test_stop_hook_active_consults_controller(self):
         result = run_hook("stop_hook.sh", {"stop_hook_active": True, "last_assistant_message": ""})
         assert result.returncode == 0

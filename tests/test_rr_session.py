@@ -246,13 +246,32 @@ class TestFinalizeCurrent:
         opened: list[str] = []
         real = rr_session._read_file_events
         monkeypatch.setattr(
-            rr_session, "_read_file_events", lambda p: opened.append(p.name) or real(p)
+            rr_session, "_read_file_events", lambda p, *a: opened.append(p.name) or real(p, *a)
         )
         _write_trace(tmp_path, [])
         rr_session.finalize_current()
         json.loads(path.read_text())
 
         assert old.name not in opened
+
+    def test_replay_is_bounded_and_skips_bad_records(
+        self, tmp_session_root, tmp_path, monkeypatch
+    ):
+        import gzip
+
+        monkeypatch.setattr(rr_session, "MAX_TRACE_LINE_BYTES", 1024)
+        path = rr_session.open_session()
+        logs = tmp_path / "logs"
+        good = json.dumps({"ts": _ts(1), "event": "task_complete", "task_id": "T-1"})
+        with gzip.open(logs / "trace.jsonl.20990101T000000_000000Z.gz", "wt") as f:
+            f.write(" " * 50_000 + "\n")  # oversized line, dropped
+            f.write('null\n{"ts": null}\n[1]\n')  # wrong shapes, skipped
+            f.write(good + "\n")
+        _write_trace(tmp_path, [])
+        rr_session.finalize_current()
+        data = json.loads(path.read_text())
+
+        assert data["tasks_completed"] == ["T-1"]
 
     def test_retry_counter(self, tmp_session_root, tmp_path):
         rr_session.open_session()
