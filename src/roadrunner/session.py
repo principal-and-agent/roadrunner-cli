@@ -106,11 +106,20 @@ def _trace_files() -> list[Path]:
     """Rotated trace archives (oldest first) followed by the live trace.
 
     Rotation renames ``trace.jsonl`` to ``trace.jsonl.<stamp>`` and gzips it, so
-    a session that spans a rotation has events in several files. Rotation moves
-    events rather than copying them, so reading every file counts each once.
+    a session that spans a rotation has events in several files. If both a rotated
+    file and its ``.gz`` twin exist, only the plain file is read, so each event
+    is counted once.
     """
-    rotated = sorted(
+    candidates = [
         p for p in TRACE_LOG.parent.glob(TRACE_LOG.name + ".*") if p.is_file()
+    ]
+    names = {p.name for p in candidates}
+    # Rotation writes ``X.gz`` before unlinking ``X``. While both exist (mid-rotation,
+    # or after a crash in that window) the plain file is the complete copy and the
+    # .gz may be partial, so prefer the plain twin to avoid double counting.
+    rotated = sorted(
+        p for p in candidates
+        if not (p.suffix == ".gz" and p.name[: -len(".gz")] in names)
     )
     live = [TRACE_LOG] if TRACE_LOG.exists() else []
     return rotated + live

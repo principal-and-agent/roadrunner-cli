@@ -132,6 +132,28 @@ class TestFinalizeCurrent:
         assert data["validation_runs"] == 2
         assert data["validation_failures"] == 1
 
+    def test_mid_rotation_twins_count_once(self, tmp_session_root, tmp_path):
+        """Plain rotated file and a truncated .gz twin both on disk: count once."""
+        import gzip
+
+        path = rr_session.open_session()
+        before = [
+            {"ts": _ts(1), "event": "validate_end", "task_id": "T-1", "passed": True},
+            {"ts": _ts(2), "event": "task_complete", "task_id": "T-1"},
+        ]
+        logs = tmp_path / "logs"
+        plain = logs / "trace.jsonl.20990101T000000_000000Z"
+        plain.write_text("".join(json.dumps(ev) + "\n" for ev in before))
+        # Crash mid-gzip: the twin is a truncated stream holding the first event.
+        gz = gzip.compress((json.dumps(before[0]) + "\n").encode())
+        (logs / (plain.name + ".gz")).write_bytes(gz[: len(gz) - 4])
+        _write_trace(tmp_path, [{"ts": _ts(3), "event": "task_complete", "task_id": "T-2"}])
+        rr_session.finalize_current()
+        data = json.loads(path.read_text())
+
+        assert data["tasks_completed"] == ["T-1", "T-2"]
+        assert data["validation_runs"] == 1
+
     def test_retry_counter(self, tmp_session_root, tmp_path):
         rr_session.open_session()
         events = [
