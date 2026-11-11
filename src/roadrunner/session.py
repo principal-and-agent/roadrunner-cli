@@ -146,8 +146,9 @@ def _read_file_events(path: Path) -> list[dict[str, Any]]:
 def _read_trace_events(max_passes: int = 3) -> list[dict[str, Any]]:
     """Read the trace (rotated archives plus live file) into a list of dicts.
 
-    If a file disappears between discovery and opening, a rotation moved it
-    mid-read; rediscover and start over so its events are neither dropped nor
+    If a file disappears between discovery and opening, or the set of trace
+    files changes while reading, a rotation ran mid-read; rediscover and start
+    over so its events are neither dropped nor
     double counted. A file that fails to parse (e.g. a truncated .gz with no
     plain twin) contributes nothing rather than a partial prefix.
     """
@@ -155,7 +156,8 @@ def _read_trace_events(max_passes: int = 3) -> list[dict[str, Any]]:
     for _ in range(max_passes):
         out = []
         vanished = False
-        for path in _trace_files():
+        files = _trace_files()
+        for path in files:
             try:
                 out.extend(_read_file_events(path))
             except FileNotFoundError:
@@ -163,7 +165,10 @@ def _read_trace_events(max_passes: int = 3) -> list[dict[str, Any]]:
                 break
             except (OSError, EOFError):
                 continue
-        if not vanished:
+        # A rotation that renamed and recreated the live file while we read
+        # leaves every open succeeding but adds a new archive; detect that by
+        # comparing the file set and retry.
+        if not vanished and _trace_files() == files:
             return out
     return out
 

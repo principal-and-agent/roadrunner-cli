@@ -185,6 +185,35 @@ class TestFinalizeCurrent:
 
         assert data["tasks_completed"] == ["T-1"]
 
+    def test_live_rotated_and_recreated_mid_read_is_counted(
+        self, tmp_session_root, tmp_path, monkeypatch
+    ):
+        """Live file renamed to an archive and recreated after discovery."""
+        path = rr_session.open_session()
+        logs = tmp_path / "logs"
+        _write_trace(tmp_path, [{"ts": _ts(1), "event": "task_complete", "task_id": "T-1"}])
+        live = logs / "trace.jsonl"
+
+        real = rr_session._trace_files
+        calls = {"n": 0}
+
+        def racing():
+            files = real()
+            calls["n"] += 1
+            if calls["n"] == 1:
+                live.rename(logs / "trace.jsonl.20990101T000000_000000Z")
+                live.write_text(
+                    json.dumps({"ts": _ts(2), "event": "task_complete", "task_id": "T-2"})
+                    + "\n"
+                )
+            return files
+
+        monkeypatch.setattr(rr_session, "_trace_files", racing)
+        rr_session.finalize_current()
+        data = json.loads(path.read_text())
+
+        assert data["tasks_completed"] == ["T-1", "T-2"]
+
     def test_retry_counter(self, tmp_session_root, tmp_path):
         rr_session.open_session()
         events = [
