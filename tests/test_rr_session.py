@@ -291,6 +291,20 @@ class TestFinalizeCurrent:
         # The pointer was cleared, so a fresh session can start.
         assert rr_session.open_session().exists()
 
+    def test_unparseable_numbers_and_nesting_are_skipped(self, tmp_session_root, tmp_path):
+        import gzip
+
+        rr_session.open_session()
+        logs = tmp_path / "logs"
+        with gzip.open(logs / "trace.jsonl.20990101T000000_000000Z.gz", "wt") as f:
+            f.write('{"ts": "%s", "task_id": %s}\n' % (_ts(1), "9" * 5000))
+            f.write("[" * 200_000 + "\n")
+            f.write(json.dumps({"ts": _ts(2), "event": "task_complete", "task_id": "T-2"}) + "\n")
+        _write_trace(tmp_path, [])
+        path = rr_session.finalize_current()
+        assert json.loads(path.read_text())["tasks_completed"] == ["T-2"]
+        assert rr_session.open_session().exists()
+
     def test_retry_counter(self, tmp_session_root, tmp_path):
         rr_session.open_session()
         events = [

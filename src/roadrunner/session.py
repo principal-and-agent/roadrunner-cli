@@ -166,7 +166,9 @@ def _read_file_events(
                 continue
             try:
                 record = json.loads(line)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
+                # JSONDecodeError is a ValueError; so is an over-long integer
+                # literal. Any record we cannot parse is skipped, never fatal.
                 # A partially-written line at tail is the only realistic
                 # cause; skip it rather than crash the summary.
                 continue
