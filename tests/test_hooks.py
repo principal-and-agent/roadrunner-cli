@@ -296,7 +296,7 @@ class TestCrashRecoveryMidTask:
         # Forward src/ on PYTHONPATH so ``python -m roadrunner`` resolves in
         # fresh-clone-no-install runs (mirrors the contract of conftest.py).
         _src = str(Path(__file__).resolve().parent.parent / "src")
-        _env = {**os.environ}
+        _env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}  # cwd decides the project, not the caller's env
         _env["PYTHONPATH"] = _src + (os.pathsep + _env["PYTHONPATH"] if _env.get("PYTHONPATH") else "")
 
         # Step 1: start the task in one subprocess (simulating one loop iteration)
