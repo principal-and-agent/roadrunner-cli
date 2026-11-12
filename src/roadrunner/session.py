@@ -330,6 +330,10 @@ def finalize_current() -> Path | None:
     for ev in events:
         kind = ev.get("event")
         tid = ev.get("task_id")
+        if tid is not None and not isinstance(tid, str):
+            # Malformed record (e.g. a list id): unhashable, so skip it rather
+            # than abort finalisation and the session start that depends on it.
+            continue
         if kind == "task_complete" and tid:
             if tid not in completed:
                 completed.append(tid)
