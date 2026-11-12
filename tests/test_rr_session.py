@@ -104,6 +104,207 @@ class TestFinalizeCurrent:
         assert data["validation_runs"] == 3
         assert data["validation_failures"] == 1
 
+    def test_counts_events_across_trace_rotation(self, tmp_session_root, tmp_path):
+        import gzip
+
+        path = rr_session.open_session()
+        before = [
+            {"ts": _ts(1), "event": "task_start", "task_id": "T-1"},
+            {"ts": _ts(2), "event": "validate_end", "task_id": "T-1", "passed": True},
+            {"ts": _ts(3), "event": "task_complete", "task_id": "T-1"},
+        ]
+        after = [
+            {"ts": _ts(4), "event": "validate_end", "task_id": "T-2", "passed": False},
+            {"ts": _ts(5), "event": "task_complete", "task_id": "T-2"},
+            {"ts": _ts(6), "event": "task_block", "task_id": "T-3"},
+        ]
+        logs = tmp_path / "logs"
+        # Rotation mid-session: archived events are gzipped, live file starts fresh.
+        with gzip.open(logs / "trace.jsonl.20990101T000000_000000Z.gz", "wt") as f:
+            for ev in before:
+                f.write(json.dumps(ev) + "\n")
+        _write_trace(tmp_path, after)
+        rr_session.finalize_current()
+        data = json.loads(path.read_text())
+
+        assert data["tasks_completed"] == ["T-1", "T-2"]
+        assert data["tasks_blocked"] == ["T-3"]
+        assert data["validation_runs"] == 2
+        assert data["validation_failures"] == 1
+
+    def test_mid_rotation_twins_count_once(self, tmp_session_root, tmp_path):
+        """Plain rotated file and a truncated .gz twin both on disk: count once."""
+        import gzip
+
+        path = rr_session.open_session()
+        before = [
+            {"ts": _ts(1), "event": "validate_end", "task_id": "T-1", "passed": True},
+            {"ts": _ts(2), "event": "task_complete", "task_id": "T-1"},
+        ]
+        logs = tmp_path / "logs"
+        plain = logs / "trace.jsonl.20990101T000000_000000Z"
+        plain.write_text("".join(json.dumps(ev) + "\n" for ev in before))
+        # Crash mid-gzip: the twin is a truncated stream holding the first event.
+        gz = gzip.compress((json.dumps(before[0]) + "\n").encode())
+        (logs / (plain.name + ".gz")).write_bytes(gz[: len(gz) - 4])
+        _write_trace(tmp_path, [{"ts": _ts(3), "event": "task_complete", "task_id": "T-2"}])
+        rr_session.finalize_current()
+        data = json.loads(path.read_text())
+
+        assert data["tasks_completed"] == ["T-1", "T-2"]
+        assert data["validation_runs"] == 1
+
+    def test_plain_twin_vanishing_mid_read_falls_back_to_gz(
+        self, tmp_session_root, tmp_path, monkeypatch
+    ):
+        """Rotation unlinks the plain file after discovery: read the .gz instead."""
+        import gzip
+
+        path = rr_session.open_session()
+        ev = {"ts": _ts(1), "event": "task_complete", "task_id": "T-1"}
+        logs = tmp_path / "logs"
+        plain = logs / "trace.jsonl.20990101T000000_000000Z"
+        plain.write_text(json.dumps(ev) + "\n")
+        with gzip.open(logs / (plain.name + ".gz"), "wt") as f:
+            f.write(json.dumps(ev) + "\n")
+        _write_trace(tmp_path, [])
+
+        real = rr_session._trace_files
+        calls = {"n": 0}
+
+        def racing():
+            files = real()
+            calls["n"] += 1
+            if calls["n"] == 1:
+                plain.unlink()  # rotation finishes between listing and opening
+            return files
+
+        monkeypatch.setattr(rr_session, "_trace_files", racing)
+        rr_session.finalize_current()
+        data = json.loads(path.read_text())
+
+        assert data["tasks_completed"] == ["T-1"]
+
+    def test_live_rotated_and_recreated_mid_read_is_counted(
+        self, tmp_session_root, tmp_path, monkeypatch
+    ):
+        """Live file renamed to an archive and recreated after discovery."""
+        path = rr_session.open_session()
+        logs = tmp_path / "logs"
+        _write_trace(tmp_path, [{"ts": _ts(1), "event": "task_complete", "task_id": "T-1"}])
+        live = logs / "trace.jsonl"
+
+        real = rr_session._trace_files
+        calls = {"n": 0}
+
+        def racing():
+            files = real()
+            calls["n"] += 1
+            if calls["n"] == 1:
+                live.rename(logs / "trace.jsonl.20990101T000000_000000Z")
+                live.write_text(
+                    json.dumps({"ts": _ts(2), "event": "task_complete", "task_id": "T-2"})
+                    + "\n"
+                )
+            return files
+
+        monkeypatch.setattr(rr_session, "_trace_files", racing)
+        rr_session.finalize_current()
+        data = json.loads(path.read_text())
+
+        assert data["tasks_completed"] == ["T-1", "T-2"]
+
+    def test_corrupt_archive_is_skipped_not_fatal(self, tmp_session_root, tmp_path):
+        import gzip
+
+        path = rr_session.open_session()
+        logs = tmp_path / "logs"
+        (logs / "trace.jsonl.20990101T000000_000000Z.gz").write_bytes(
+            b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03garbage-not-deflate"
+        )
+        (logs / "trace.jsonl.20990101T000001_000000Z.gz").write_bytes(
+            gzip.compress(b"\xff\xfe\xfa not utf-8\n")
+        )
+        _write_trace(tmp_path, [{"ts": _ts(1), "event": "task_complete", "task_id": "T-1"}])
+        rr_session.finalize_current()
+        data = json.loads(path.read_text())
+
+        assert data["tasks_completed"] == ["T-1"]
+
+    def test_archive_older_than_session_is_not_replayed(
+        self, tmp_session_root, tmp_path, monkeypatch
+    ):
+        import gzip
+        import os as _os
+
+        logs = tmp_path / "logs"
+        old = logs / "trace.jsonl.20000101T000000_000000Z.gz"
+        with gzip.open(old, "wt") as f:
+            f.write(json.dumps({"ts": _ts(1), "event": "task_complete", "task_id": "X"}) + "\n")
+        _os.utime(old, (946684800, 946684800))  # 2000-01-01
+        path = rr_session.open_session()
+        opened: list[str] = []
+        real = rr_session._read_file_events
+        monkeypatch.setattr(
+            rr_session, "_read_file_events", lambda p, *a: opened.append(p.name) or real(p, *a)
+        )
+        _write_trace(tmp_path, [])
+        rr_session.finalize_current()
+        json.loads(path.read_text())
+
+        assert old.name not in opened
+
+    def test_replay_is_bounded_and_skips_bad_records(
+        self, tmp_session_root, tmp_path, monkeypatch
+    ):
+        import gzip
+
+        monkeypatch.setattr(rr_session, "MAX_TRACE_LINE_BYTES", 1024)
+        path = rr_session.open_session()
+        logs = tmp_path / "logs"
+        good = json.dumps({"ts": _ts(1), "event": "task_complete", "task_id": "T-1"})
+        with gzip.open(logs / "trace.jsonl.20990101T000000_000000Z.gz", "wt") as f:
+            f.write(" " * 50_000 + "\n")  # oversized line, dropped
+            f.write('null\n{"ts": null}\n[1]\n')  # wrong shapes, skipped
+            f.write(good + "\n")
+        _write_trace(tmp_path, [])
+        rr_session.finalize_current()
+        data = json.loads(path.read_text())
+
+        assert data["tasks_completed"] == ["T-1"]
+
+    def test_non_string_task_id_in_archive_does_not_break_restart(
+        self, tmp_session_root, tmp_path
+    ):
+        import gzip
+
+        rr_session.open_session()
+        logs = tmp_path / "logs"
+        with gzip.open(logs / "trace.jsonl.20990101T000000_000000Z.gz", "wt") as f:
+            for kind in ("task_start", "task_complete", "task_block"):
+                f.write(json.dumps({"ts": _ts(1), "event": kind, "task_id": ["T-1"]}) + "\n")
+            f.write(json.dumps({"ts": _ts(2), "event": "task_complete", "task_id": "T-2"}) + "\n")
+        _write_trace(tmp_path, [])
+        path = rr_session.finalize_current()
+        data = json.loads(path.read_text())
+        assert data["tasks_completed"] == ["T-2"]
+        # The pointer was cleared, so a fresh session can start.
+        assert rr_session.open_session().exists()
+
+    def test_unparseable_numbers_and_nesting_are_skipped(self, tmp_session_root, tmp_path):
+        import gzip
+
+        rr_session.open_session()
+        logs = tmp_path / "logs"
+        with gzip.open(logs / "trace.jsonl.20990101T000000_000000Z.gz", "wt") as f:
+            f.write('{"ts": "%s", "task_id": %s}\n' % (_ts(1), "9" * 5000))
+            f.write("[" * 200_000 + "\n")
+            f.write(json.dumps({"ts": _ts(2), "event": "task_complete", "task_id": "T-2"}) + "\n")
+        _write_trace(tmp_path, [])
+        path = rr_session.finalize_current()
+        assert json.loads(path.read_text())["tasks_completed"] == ["T-2"]
+        assert rr_session.open_session().exists()
+
     def test_retry_counter(self, tmp_session_root, tmp_path):
         rr_session.open_session()
         events = [

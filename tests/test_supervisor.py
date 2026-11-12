@@ -359,7 +359,8 @@ def test_claude_adapter_structured_output_ignores_stderr(project, monkeypatch, d
     monkeypatch.setenv("PATH", str(binaries) + os.pathsep + os.environ["PATH"])
     path = project.parent / "policy.json"
     policy = json.loads(path.read_text())
-    policy.update(adapter="claude", sandbox="macos")
+    # The sandbox denial stream can take ~16s to start; keep it inside the budgets.
+    policy.update(adapter="claude", sandbox="macos", run_seconds=120, attempt_seconds=60)
     path.write_text(json.dumps(policy))
     result = invoke(project)
     if denied:

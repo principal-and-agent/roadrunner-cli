@@ -34,8 +34,10 @@ Design notes
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
+import zlib
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -101,22 +103,130 @@ def _iso_for_filename(iso: str) -> str:
     return iso.replace(":", "").replace("+", "").replace(".", "_")
 
 
-def _read_trace_events() -> list[dict[str, Any]]:
-    """Read trace.jsonl into a list of dicts. Missing file → empty."""
-    if not TRACE_LOG.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    with open(TRACE_LOG, encoding="utf-8") as f:
-        for line in f:
+def _trace_files() -> list[Path]:
+    """Rotated trace archives (oldest first) followed by the live trace.
+
+    Rotation renames ``trace.jsonl`` to ``trace.jsonl.<stamp>`` and gzips it, so
+    a session that spans a rotation has events in several files. If both a rotated
+    file and its ``.gz`` twin exist, only the plain file is read, so each event
+    is counted once.
+    """
+    candidates = [
+        p for p in TRACE_LOG.parent.glob(TRACE_LOG.name + ".*") if p.is_file()
+    ]
+    names = {p.name for p in candidates}
+    # Rotation writes ``X.gz`` before unlinking ``X``. While both exist (mid-rotation,
+    # or after a crash in that window) the plain file is the complete copy and the
+    # .gz may be partial, so prefer the plain twin to avoid double counting.
+    rotated = sorted(
+        p for p in candidates
+        if not (p.suffix == ".gz" and p.name[: -len(".gz")] in names)
+    )
+    live = [TRACE_LOG] if TRACE_LOG.exists() else []
+    return rotated + live
+
+
+# Replay bounds: a trace line is a small JSON record and a session spans at
+# most a few 10 MB rotations, so these only bite on corrupt or hostile input.
+MAX_TRACE_LINE_BYTES = 1024 * 1024
+MAX_REPLAY_BYTES = 256 * 1024 * 1024
+
+
+class _ReplayBudget:
+    def __init__(self, limit: int = MAX_REPLAY_BYTES) -> None:
+        self.remaining = limit
+
+
+def _read_file_events(
+    path: Path, budget: _ReplayBudget | None = None
+) -> list[dict[str, Any]]:
+    """Parse one trace file. Raises FileNotFoundError if it vanished.
+
+    Lines over MAX_TRACE_LINE_BYTES are discarded without being held whole,
+    and reading stops once the shared replay budget is spent. Records that are
+    not objects with a string ``ts`` are skipped.
+    """
+    budget = budget or _ReplayBudget()
+    opener = gzip.open if path.suffix == ".gz" else open
+    events: list[dict[str, Any]] = []
+    with opener(path, "rt", encoding="utf-8") as f:
+        while budget.remaining > 0:
+            line = f.readline(MAX_TRACE_LINE_BYTES + 1)
+            if not line:
+                break
+            budget.remaining -= len(line)
+            if len(line) > MAX_TRACE_LINE_BYTES:
+                # Oversized line: drain the rest of it in bounded chunks.
+                while line and not line.endswith("\n") and budget.remaining > 0:
+                    line = f.readline(MAX_TRACE_LINE_BYTES)
+                    budget.remaining -= len(line)
+                continue
             line = line.strip()
             if not line:
                 continue
             try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
+                record = json.loads(line)
+            except (ValueError, RecursionError):
+                # JSONDecodeError is a ValueError; so is an over-long integer
+                # literal. Any record we cannot parse is skipped, never fatal.
                 # A partially-written line at tail is the only realistic
                 # cause; skip it rather than crash the summary.
                 continue
+            if isinstance(record, dict) and isinstance(record.get("ts", ""), str):
+                events.append(record)
+    return events
+
+
+def _modified_before(path: Path, cutoff_iso: str) -> bool:
+    """True if ``path`` was last written before ``cutoff_iso``.
+
+    An archive untouched since before the session started cannot hold any of
+    its events, so it is never decompressed. This bounds replay to the
+    rotations that happened during the session.
+    """
+    if not cutoff_iso:
+        return False
+    try:
+        cutoff = datetime.fromisoformat(cutoff_iso).timestamp()
+        return path.stat().st_mtime < cutoff
+    except (OSError, ValueError):
+        return False
+
+
+def _read_trace_events(
+    max_passes: int = 3, since_iso: str = ""
+) -> list[dict[str, Any]]:
+    """Read the trace (rotated archives plus live file) into a list of dicts.
+
+    If a file disappears between discovery and opening, or the set of trace
+    files changes while reading, a rotation ran mid-read; rediscover and start
+    over so its events are neither dropped nor
+    double counted. A file that fails to parse (e.g. a truncated .gz with no
+    plain twin) contributes nothing rather than a partial prefix.
+    """
+    out: list[dict[str, Any]] = []
+    for _ in range(max_passes):
+        out = []
+        vanished = False
+        budget = _ReplayBudget()
+        files = _trace_files()
+        for path in files:
+            if path != TRACE_LOG and _modified_before(path, since_iso):
+                continue
+            try:
+                out.extend(_read_file_events(path, budget))
+            except FileNotFoundError:
+                vanished = True
+                break
+            except (OSError, EOFError, zlib.error, UnicodeDecodeError):
+                # A corrupt or undecodable archive is dropped whole rather
+                # than aborting the summary (and the stop hook with it).
+                continue
+        # A rotation that renamed and recreated the live file while we read
+        # leaves every open succeeding but adds a new archive; detect that by
+        # comparing the file set and retry.
+        if not vanished and _trace_files() == files:
+            return out
     return out
 
 
@@ -210,7 +320,7 @@ def finalize_current() -> Path | None:
     started_at = summary.get("started_at", "")
     ended_at = _now()
 
-    events = _events_after(_read_trace_events(), started_at)
+    events = _events_after(_read_trace_events(since_iso=started_at), started_at)
 
     completed: list[str] = []
     blocked: list[str] = []
@@ -222,6 +332,10 @@ def finalize_current() -> Path | None:
     for ev in events:
         kind = ev.get("event")
         tid = ev.get("task_id")
+        if tid is not None and not isinstance(tid, str):
+            # Malformed record (e.g. a list id): unhashable, so skip it rather
+            # than abort finalisation and the session start that depends on it.
+            continue
         if kind == "task_complete" and tid:
             if tid not in completed:
                 completed.append(tid)
