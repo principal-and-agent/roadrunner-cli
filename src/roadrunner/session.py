@@ -133,8 +133,9 @@ MAX_REPLAY_BYTES = 256 * 1024 * 1024
 
 
 class _ReplayBudget:
-    def __init__(self, limit: int = MAX_REPLAY_BYTES) -> None:
-        self.remaining = limit
+    def __init__(self, limit: int | None = None) -> None:
+        # Resolve the module limit at call time so it can be adjusted.
+        self.remaining = MAX_REPLAY_BYTES if limit is None else limit
 
 
 def _read_file_events(
@@ -142,26 +143,31 @@ def _read_file_events(
 ) -> list[dict[str, Any]]:
     """Parse one trace file. Raises FileNotFoundError if it vanished.
 
-    Lines over MAX_TRACE_LINE_BYTES are discarded without being held whole,
-    and reading stops once the shared replay budget is spent. Records that are
-    not objects with a string ``ts`` are skipped.
+    Files are read in binary mode so both limits count UTF-8 bytes. Lines over
+    MAX_TRACE_LINE_BYTES are discarded without being held whole, and reading
+    stops once the shared replay budget is spent. Records that are not valid
+    UTF-8 JSON objects with a string ``ts`` are skipped.
     """
     budget = budget or _ReplayBudget()
+    line_limit = MAX_TRACE_LINE_BYTES
     opener = gzip.open if path.suffix == ".gz" else open
     events: list[dict[str, Any]] = []
-    with opener(path, "rt", encoding="utf-8") as f:
+    with opener(path, "rb") as f:
         while budget.remaining > 0:
-            line = f.readline(MAX_TRACE_LINE_BYTES + 1)
-            if not line:
+            raw = f.readline(line_limit + 1)
+            if not raw:
                 break
-            budget.remaining -= len(line)
-            if len(line) > MAX_TRACE_LINE_BYTES:
+            budget.remaining -= len(raw)
+            if len(raw) > line_limit:
                 # Oversized line: drain the rest of it in bounded chunks.
-                while line and not line.endswith("\n") and budget.remaining > 0:
-                    line = f.readline(MAX_TRACE_LINE_BYTES)
-                    budget.remaining -= len(line)
+                while raw and not raw.endswith(b"\n") and budget.remaining > 0:
+                    raw = f.readline(line_limit)
+                    budget.remaining -= len(raw)
                 continue
-            line = line.strip()
+            try:
+                line = raw.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                continue
             if not line:
                 continue
             try:
