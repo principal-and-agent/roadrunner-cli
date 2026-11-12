@@ -34,6 +34,7 @@ Design notes
 
 from __future__ import annotations
 
+import codecs
 import gzip
 import json
 import os
@@ -148,7 +149,8 @@ def _read_file_events(
     read or drained, it never goes negative, and a line is parsed only if the
     complete physical line (including its newline) fits in what remains.
     Lines of up to MAX_TRACE_LINE_BYTES (newline included) are accepted;
-    longer lines are drained in bounded chunks without being held whole.
+    longer lines are drained in bounded chunks without being held whole,
+    but are still validated as UTF-8 incrementally.
     Records that are not JSON objects with a string ``ts`` are skipped.
     Undecodable UTF-8 raises UnicodeDecodeError so the caller drops the whole
     file rather than keeping a partial view of it.
@@ -167,12 +169,26 @@ def _read_file_events(
             complete = raw.endswith(b"\n") or len(raw) < want  # newline or EOF
             if len(raw) > line_limit:
                 # Oversized line: drain the rest of it in bounded chunks,
-                # never past the budget.
-                while (
-                    raw and not raw.endswith(b"\n") and budget.remaining > 0
-                ):
-                    raw = f.readline(min(line_limit, budget.remaining))
+                # never past the budget. Every chunk is fed to an incremental
+                # UTF-8 decoder (state kept across chunk boundaries) so invalid
+                # bytes anywhere in the line still raise UnicodeDecodeError,
+                # without holding the line in memory.
+                decoder = codecs.getincrementaldecoder("utf-8")()
+                decoder.decode(raw)
+                ended = raw.endswith(b"\n")
+                while not ended and budget.remaining > 0:
+                    chunk_want = min(line_limit, budget.remaining)
+                    raw = f.readline(chunk_want)
                     budget.remaining -= len(raw)
+                    decoder.decode(raw)
+                    # Newline or EOF ends the line.
+                    ended = (
+                        not raw
+                        or raw.endswith(b"\n")
+                        or len(raw) < chunk_want
+                    )
+                if ended:
+                    decoder.decode(b"", final=True)
                 continue
             if not complete:
                 # The budget ran out mid-line; the line does not fit.
