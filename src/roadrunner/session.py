@@ -143,10 +143,15 @@ def _read_file_events(
 ) -> list[dict[str, Any]]:
     """Parse one trace file. Raises FileNotFoundError if it vanished.
 
-    Files are read in binary mode so both limits count UTF-8 bytes. Lines over
-    MAX_TRACE_LINE_BYTES are discarded without being held whole, and reading
-    stops once the shared replay budget is spent. Records that are not valid
-    UTF-8 JSON objects with a string ``ts`` are skipped.
+    Files are read in binary mode so both limits count bytes. The shared
+    replay budget is strict: no more than ``budget.remaining`` bytes are ever
+    read or drained, it never goes negative, and a line is parsed only if the
+    complete physical line (including its newline) fits in what remains.
+    Lines of up to MAX_TRACE_LINE_BYTES (newline included) are accepted;
+    longer lines are drained in bounded chunks without being held whole.
+    Records that are not JSON objects with a string ``ts`` are skipped.
+    Undecodable UTF-8 raises UnicodeDecodeError so the caller drops the whole
+    file rather than keeping a partial view of it.
     """
     budget = budget or _ReplayBudget()
     line_limit = MAX_TRACE_LINE_BYTES
@@ -154,20 +159,25 @@ def _read_file_events(
     events: list[dict[str, Any]] = []
     with opener(path, "rb") as f:
         while budget.remaining > 0:
-            raw = f.readline(line_limit + 1)
+            want = min(line_limit + 1, budget.remaining)
+            raw = f.readline(want)
             if not raw:
                 break
             budget.remaining -= len(raw)
+            complete = raw.endswith(b"\n") or len(raw) < want  # newline or EOF
             if len(raw) > line_limit:
-                # Oversized line: drain the rest of it in bounded chunks.
-                while raw and not raw.endswith(b"\n") and budget.remaining > 0:
-                    raw = f.readline(line_limit)
+                # Oversized line: drain the rest of it in bounded chunks,
+                # never past the budget.
+                while (
+                    raw and not raw.endswith(b"\n") and budget.remaining > 0
+                ):
+                    raw = f.readline(min(line_limit, budget.remaining))
                     budget.remaining -= len(raw)
                 continue
-            try:
-                line = raw.decode("utf-8").strip()
-            except UnicodeDecodeError:
-                continue
+            if not complete:
+                # The budget ran out mid-line; the line does not fit.
+                break
+            line = raw.decode("utf-8").strip()
             if not line:
                 continue
             try:
