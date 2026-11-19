@@ -146,6 +146,22 @@ def test_tampered_gate_blocks(project):
     assert runner.git(project, "rev-parse", saved["branch"]) == saved["base"]
 
 
+
+def test_validation_can_create_a_temporary_git_worktree(project):
+    policy_path = project.parent / "policy.json"
+    policy = json.loads(policy_path.read_text())
+    policy["validation_commands"].append(
+        'repo=$(mktemp -d) && git -C "$repo" init && '
+        'test "$(git -C "$repo" rev-parse --is-inside-work-tree)" = true'
+    )
+    policy_path.write_text(json.dumps(policy))
+
+    result = invoke(project)
+    assert result.returncode == 0, result.stdout + result.stderr
+    work_root = Path(state(project)[0]["task_work_root"])
+    assert not list(work_root.glob("scratch-*"))
+
+
 def test_invalid_transition_rejected():
     for phase in ("ready", "running", "validating", "blocked", "resolved"):
         with pytest.raises(ValueError):
@@ -189,16 +205,18 @@ def test_deadline_and_cancellation_cleanup(project):
         command(project), stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ, PYTHONPATH=str(SOURCE / "src"))
     )
     for _ in range(100):
-        paths = list(runner.location(project).glob("*/scratch-*/child.pid"))
+        run_files = list(runner.location(project).glob("*/run.json"))
+        paths = list(Path(state(project)[0]["task_work_root"]).glob("scratch-*/child.pid")) if run_files else []
         if paths:
             break
         time.sleep(0.05)
+    child_pid = int(paths[0].read_text())
     process.send_signal(signal.SIGTERM)
     stdout, stderr = process.communicate(timeout=5)
     assert process.returncode == 2, stderr
     assert json.loads(stdout)["items"][0]["phase"] == "cancelled"
     assert state(project)[0]["reserved_usd"] == 1
-    child_pid = int(paths[0].read_text())
+    assert not paths[0].parent.exists()
     for _ in range(40):
         try:
             os.kill(child_pid, 0)
@@ -245,10 +263,12 @@ def test_attempt_timeout_blocks(project):
 
 def test_changed_integration_ref_cannot_resolve(project):
     # Simulate an external writer, using the explicit trusted fixture adapter.
-    (project.parent / "agent.py").write_text("""import json, os, subprocess
+    (project.parent / "agent.py").write_text("""import json, subprocess
 from pathlib import Path
 Path('one').write_text('fixed')
-state = json.loads((Path(os.environ['TMPDIR']).parent / 'run.json').read_text())
+common = subprocess.check_output(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], text=True)
+run_file, = (Path(common.strip()) / 'roadrunner').glob('*/run.json')
+state = json.loads(run_file.read_text())
 subprocess.run(['git', 'update-ref', '-d', state['branch']], check=True)
 """)
     result = invoke(project)
