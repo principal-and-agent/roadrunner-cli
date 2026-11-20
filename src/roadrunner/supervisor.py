@@ -594,8 +594,6 @@ def drive(project, directory, state):
         number = len(item["attempts"]) + 1
         base = git(project, "rev-parse", state["branch"])
         work = Path(state.get("task_work_root", str(directory))) / ("work-" + task["id"])
-        scratch = directory / ("scratch-" + task["id"])
-        scratch.mkdir(exist_ok=True)
         attempt = dict(
             id=str(uuid.uuid4()), number=number, base=base, started_at=time.time(), budget_usd=min(remaining, policy["attempt_budget_usd"])
         )
@@ -604,7 +602,13 @@ def drive(project, directory, state):
         transition(item, "running")
         checkpoint(directory, state)
         failure_category = "infrastructure"
+        scratch_dir = None
         try:
+            scratch_dir = tempfile.TemporaryDirectory(
+                prefix="scratch-" + task["id"] + "-",
+                dir=state.get("task_work_root"),
+            )
+            scratch = Path(scratch_dir.name).resolve()
             if not work.exists():
                 git(project, "worktree", "add", "--detach", str(work), base)
             elif git(work, "rev-parse", "HEAD") != base:
@@ -788,6 +792,9 @@ def drive(project, directory, state):
                     except ValueError:
                         pass
                 transition(item, "ready", attempt["reason"])
+        finally:
+            if scratch_dir is not None:
+                scratch_dir.cleanup()
         attempt["finished_at"] = time.time()
         checkpoint(directory, state)
     checkpoint(directory, state)
