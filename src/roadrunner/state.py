@@ -38,7 +38,16 @@ except ImportError:  # pragma: no cover - Windows fallback keeps the module impo
 # ── Type alias ──────────────────────────────────────────────────────────────
 
 
+class ValidationDefinition(TypedDict):
+    task_id: str
+    baseline: list[str]
+    commands: list[str]
+    timeout: float
+    coverage_floor: int
+
+
 class RoadmapState(TypedDict, total=False):
+    active_validation: ValidationDefinition | None
     current_task_id: str | None
     iteration: int  # lifetime-cumulative counter (audit trail)
     session_iteration: int  # per-session counter; reset on SessionStart; gates the iteration cap (ROAD-010)

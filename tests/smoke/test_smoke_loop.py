@@ -236,11 +236,6 @@ class TestSmokeLoopStateMachine:
         """After cmd_complete fires, current_task_id must be None so SessionStart
         does not emit stale resume briefs (the ROAD-023 regression). Works on
         any state schema; does NOT depend on ROAD-010."""
-        tasks = roadrunner.load_tasks()
-        tasks[0]["status"] = "in_progress"
-        roadrunner.save_tasks(tasks)
-        roadrunner.write_state("SMOKE-001", 1, {"SMOKE-001": 1})
-
         # Patch _git so cmd_complete's branch-merge path no-ops cleanly inside tmp_path.
         with patch.object(
             roadrunner,
@@ -252,10 +247,9 @@ class TestSmokeLoopStateMachine:
                 (),
                 {"task_id": "SMOKE-001", "notes": "smoke complete"},
             )()
-            try:
-                roadrunner.cmd_complete(args)
-            except SystemExit:
-                pass
+            roadrunner.cmd_start(args)
+            roadrunner.write_state("SMOKE-001", 1, {"SMOKE-001": 1})
+            roadrunner.cmd_complete(args)
 
         s = roadrunner.read_state()
         assert s.get("current_task_id") is None, (

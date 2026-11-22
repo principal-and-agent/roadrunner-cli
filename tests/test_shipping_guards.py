@@ -109,3 +109,51 @@ def test_packaged_scaffold_assets():
     scaffold = SOURCE / 'src/roadrunner/scaffold'
     assert (scaffold / '.claude/settings.json').is_file()
     assert (scaffold / 'hooks/stop_hook.sh').read_bytes() == (SOURCE / 'hooks/stop_hook.sh').read_bytes()
+
+
+@pytest.mark.parametrize(('scope', 'field', 'changed'), [
+    ('task', 'validation_commands', ['touch replacement-ran']),
+    ('project', 'baseline_validation', ['touch replacement-ran']),
+    ('project', 'coverage_floor', 1),
+    ('task', 'validation_timeout', 5),
+])
+def test_completion_requires_start_time_validation(project, scope, field, changed):
+    path = project / 'tasks/tasks.yaml'
+    data = yaml.safe_load(path.read_text())
+    data['tasks'][0]['validation_commands'] = ['test -f result && touch original-ran']
+    path.write_text(yaml.safe_dump(data))
+    initialize_git(project)
+    assert invoke(project, 'start', 'TASK-001').returncode == 0
+    original = path.read_text()
+    data = yaml.safe_load(original)
+    target = data if scope == 'project' else data['tasks'][0]
+    target[field] = changed
+    path.write_text(yaml.safe_dump(data))
+
+    result = invoke(project, 'complete', 'TASK-001')
+    assert result.returncode != 0
+    assert 'validation definition changed' in (result.stdout + result.stderr).lower()
+    assert not (project / 'replacement-ran').exists()
+    assert not (project / 'original-ran').exists()
+    assert yaml.safe_load(path.read_text())['tasks'][0]['status'] == 'in_progress'
+    assert git(project, 'branch', '--show-current') == 'roadrunner/TASK-001'
+
+    path.write_text(original)
+    result = invoke(project, 'complete', 'TASK-001')
+    assert result.returncode == 0, result.stderr
+    assert (project / 'original-ran').exists()
+    assert yaml.safe_load(path.read_text())['tasks'][0]['status'] == 'done'
+
+
+def test_legacy_active_task_without_validation_snapshot_requires_restart(project):
+    initialize_git(project)
+    assert invoke(project, 'start', 'TASK-001').returncode == 0
+    path = project / '.roadmap_state.json'
+    state = json.loads(path.read_text())
+    del state['active_validation']
+    path.write_text(json.dumps(state))
+
+    result = invoke(project, 'complete', 'TASK-001')
+    assert result.returncode != 0
+    assert 'restart this task from todo' in result.stderr
+    assert git(project, 'branch', '--show-current') == 'roadrunner/TASK-001'

@@ -37,6 +37,7 @@ from .state import (  # noqa: F401 — re-exports
     STATE_LOCK,
     STATE_SCHEMA_VERSION,
     RoadmapState,
+    ValidationDefinition,
     _exclusive_state_lock,
     increment_attempts,
     read_state,
@@ -780,7 +781,17 @@ def _head_tail(text: str, keep: int = VALIDATION_OUTPUT_KEEP) -> str:
     return f"{text[:keep]}\n... [{omitted} chars omitted] ...\n{text[-keep:]}"
 
 
-def run_validation(task: Task) -> tuple[bool, list[ValidationResult]]:
+def _validation_definition(task: Task) -> ValidationDefinition:
+    return {
+        "task_id": task["id"],
+        "baseline": get_baseline_validation(),
+        "commands": task.get("validation_commands", []),
+        "timeout": task.get("validation_timeout", DEFAULT_VALIDATION_TIMEOUT),
+        "coverage_floor": get_coverage_floor(task),
+    }
+
+
+def run_validation(task: Task, definition: ValidationDefinition | None = None) -> tuple[bool, list[ValidationResult]]:
     """Run project baseline (if any), then the task's validation_commands.
 
     ROAD-015: a project-wide ``baseline_validation`` list at the top of
@@ -797,14 +808,16 @@ def run_validation(task: Task) -> tuple[bool, list[ValidationResult]]:
     """
     import time
 
-    baseline = get_baseline_validation()
-    task_commands = task.get("validation_commands", [])
+    if definition is None:
+        definition = _validation_definition(task)
+    baseline = definition["baseline"]
+    task_commands = definition["commands"]
     if not baseline and not task_commands:
         return True, []
 
     results: list[ValidationResult] = []
     state = read_state()
-    timeout = task.get("validation_timeout", DEFAULT_VALIDATION_TIMEOUT)
+    timeout = definition["timeout"]
 
     def _run_one(cmd: str, phase: str) -> bool:
         t0 = time.monotonic()
@@ -859,7 +872,7 @@ def run_validation(task: Task) -> tuple[bool, list[ValidationResult]]:
     all_passed = baseline_passed and task_passed
     # Coverage floor (issue #18): "ok" (nothing that ran failed) is not
     # "verified" (enough checks that assert something actually passed).
-    floor = get_coverage_floor(task)
+    floor = definition["coverage_floor"]
     substantive = sum(1 for r in results if r["passed"] and not r.get("vacuous"))
     if all_passed and substantive < floor:
         all_passed = False
@@ -1210,6 +1223,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     # project_base from tasks.yaml over _current_branch() to avoid stacking
     # task branches on top of previous task branches (ROAD-025).
     base_branch = get_project_base()
+    validation = _validation_definition(task)
     branched = create_task_branch(args.task_id, base_branch=base_branch)
     if _is_git_repo() and not branched:
         raise ValueError("Task branch preparation failed; task was not started")
@@ -1219,7 +1233,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         args.task_id,
         state.get("iteration", 0),
         attempts,
-        extra={"base_branch": base_branch},
+        extra={"base_branch": base_branch, "active_validation": validation},
     )
     append_changelog(args.task_id, "in_progress")
     trace_event(
@@ -1328,9 +1342,17 @@ def cmd_complete(args: argparse.Namespace) -> None:
     if any(not (prerequisite := get_task(tasks, dep)) or prerequisite.get("status") != "done"
            for dep in task.get("depends_on", [])):
         raise ValueError("Completion requires resolved dependencies")
-    if not task.get("validation_commands") and not get_baseline_validation():
+    validation = state.get("active_validation")
+    if validation is None:
+        raise ValueError(
+            "Missing start-time validation definition. Review the roadmap and restart this task from todo "
+            "on its original base branch."
+        )
+    if validation != _validation_definition(task):
+        raise ValueError("Validation definition changed since start. Restore the original validation settings and retry.")
+    if not validation["commands"] and not validation["baseline"]:
         raise ValueError("Completion requires validation commands")
-    passed, results = run_validation(task)
+    passed, results = run_validation(task, validation)
     _record_failure_signature(args.task_id, passed, results)
     if not passed:
         print(f"Validation failed. Task {args.task_id} NOT marked done.")
@@ -1347,8 +1369,6 @@ def cmd_complete(args: argparse.Namespace) -> None:
     append_changelog(args.task_id, "done", notes=args.notes or "")
     write_reset_marker(args.task_id, summary=args.notes or "Completed.")
     state = read_state()
-    # Merge task branch back to base if it exists
-    base_branch = state.get("base_branch", "main")
     # Clear current_task_id so SessionStart / check_stop don't read a stale
     # "resume this done task" pointer on the next fire. Preserve iteration,
     # attempts, and base_branch for continuity.
@@ -1356,7 +1376,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
         None,
         state.get("iteration", 0),
         state.get("attempts_per_task", {}),
-        extra={"base_branch": base_branch} if base_branch else None,
+        extra={"active_validation": None},
     )
     trace_event(
         "task_complete",
