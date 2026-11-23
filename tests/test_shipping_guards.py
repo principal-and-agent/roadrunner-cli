@@ -55,6 +55,44 @@ def test_stop_preserves_base(project):
     assert json.loads((project / '.roadmap_state.json').read_text())['base_branch'] == 'release'
 
 
+def test_stop_hook_uses_default_iteration_cap_for_invalid_environment(project, monkeypatch):
+    (project / '.roadmap_state.json').write_text(json.dumps({'session_iteration': 99}))
+    monkeypatch.setenv('ROADMAP_MAX_ITERATIONS', 'abc')
+    result = invoke(project, 'hook')
+    assert result.returncode == 0, result.stderr
+    decision = json.loads(result.stdout)
+    assert decision['continue'] is False
+    assert 'Max iterations (100)' in decision['stopReason']
+    assert result.stderr.count('ROADMAP_MAX_ITERATIONS') == 1
+
+
+@pytest.mark.parametrize('budget', ['abc', 'inf', '-5'])
+def test_stop_hook_warns_for_invalid_budget(project, monkeypatch, budget):
+    monkeypatch.setenv('ROADMAP_MAX_BUDGET_USD', budget)
+    result = invoke(project, 'hook', payload={'total_cost_usd': 100.0})
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['decision'] == 'block'
+    assert result.stderr.count('ROADMAP_MAX_BUDGET_USD') == 1
+
+
+def test_block_preserves_completed_tasks_and_records_prior_status(project):
+    result = invoke(project, 'block', 'TASK-001', '--notes', 'Waiting for review')
+    assert result.returncode == 0, result.stderr
+    path = project / 'tasks/tasks.yaml'
+    data = yaml.safe_load(path.read_text())
+    assert data['tasks'][0]['status'] == 'blocked'
+    data['tasks'][0]['status'] = 'done'
+    path.write_text(yaml.safe_dump(data))
+    result = invoke(project, 'block', 'TASK-001')
+    assert result.returncode != 0
+    assert 'done' in result.stderr
+    assert yaml.safe_load(path.read_text())['tasks'][0]['status'] == 'done'
+    events = [json.loads(line) for line in (project / 'logs/trace.jsonl').read_text().splitlines()]
+    assert [(event['event'], event['from_status']) for event in events if event['event'].startswith('task_block')] == [
+        ('task_block', 'todo'), ('task_block_rejected', 'done'),
+    ]
+
+
 @pytest.mark.parametrize('defect', ['duplicate', 'unknown', 'cycle'])
 def test_invalid_plan_rejected(project, defect):
     path = project / 'tasks/tasks.yaml'
