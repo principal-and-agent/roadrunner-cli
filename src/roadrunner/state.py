@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,6 +120,27 @@ STATE_SCHEMA_VERSION = 3  # bump when .roadmap_state.json format changes incompa
 
 
 # ── Internal helpers ────────────────────────────────────────────────────────
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Publish complete UTF-8 text via a synced temporary file on the same filesystem."""
+    path = path.resolve()
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        mode = None
+
+    # A private directory isolates concurrent writers and lets a new file
+    # inherit the caller's umask as it would with a regular text write.
+    with tempfile.TemporaryDirectory(prefix=f".{path.name}.", dir=path.parent) as scratch:
+        temporary = Path(scratch) / "content"
+        with temporary.open("w", encoding="utf-8") as stream:
+            stream.write(content)
+            if mode is not None:
+                os.fchmod(stream.fileno(), mode)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
 
 
 def _now() -> str:

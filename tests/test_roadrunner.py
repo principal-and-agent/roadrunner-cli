@@ -1,11 +1,13 @@
 """Tests for roadrunner.py controller logic."""
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
 import sys
 import time
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -130,6 +132,86 @@ def tmp_project(tmp_path):
         setattr(rr_state, k, v)
     for k, v in orig_session.items():
         setattr(rr_session, k, v)
+
+
+@pytest.mark.parametrize('command', ['start', 'block'])
+def test_roadmap_transition_holds_stop_lock(tmp_project, monkeypatch, command):
+    original = roadrunner.save_tasks
+
+    def save_while_locked(tasks):
+        with rr_state.STATE_LOCK.open('a') as lock:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        original(tasks)
+
+    monkeypatch.setattr(roadrunner, 'save_tasks', save_while_locked)
+    monkeypatch.setattr(roadrunner, '_is_git_repo', lambda: False)
+    getattr(roadrunner, f'cmd_{command}')(argparse.Namespace(task_id='TASK-002', notes=''))
+
+
+@pytest.mark.parametrize('max_attempts', [1, 5], ids=['auto-blocked', 'still-active'])
+def test_complete_preserves_stop_updates_during_validation(tmp_project, monkeypatch, max_attempts):
+    monkeypatch.setattr(roadrunner, '_is_git_repo', lambda: False)
+    roadrunner.cmd_start(argparse.Namespace(task_id='TASK-002'))
+
+    def validate_during_stop(task, validation):
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=str(tmp_project), PYTHONPATH=str(Path(__file__).resolve().parents[1] / 'src'))
+        stop = subprocess.run(
+            [sys.executable, '-m', 'roadrunner', 'check-stop', '--max-attempts', str(max_attempts)],
+            env=env, cwd=tmp_project, input='{}', text=True, capture_output=True, timeout=10, check=True,
+        )
+        assert json.loads(stop.stdout)['decision'] == 'block'
+        return True, []
+
+    monkeypatch.setattr(roadrunner, 'run_validation', validate_during_stop)
+    monkeypatch.setattr(roadrunner, 'merge_task_branch', lambda *_: True)
+    args = argparse.Namespace(task_id='TASK-002', notes='')
+    if max_attempts == 1:
+        with pytest.raises(ValueError, match='current active task'):
+            roadrunner.cmd_complete(args)
+    else:
+        roadrunner.cmd_complete(args)
+    state = roadrunner.read_state()
+    assert state['attempts_per_task'] == {'TASK-002': 1}
+    assert state['iteration'] == state['session_iteration'] == 1
+    task = roadrunner.get_task(roadrunner.load_tasks(), 'TASK-002')
+    assert task is not None and task['status'] == ('blocked' if max_attempts == 1 else 'done')
+
+
+@pytest.mark.parametrize('writer', ['work log', 'reset marker', 'snapshot', 'init', 'session pointer'])
+def test_legacy_writers_publish_atomically(tmp_project, monkeypatch, writer):
+    if writer == 'work log':
+        target = roadrunner.LOGS_DIR / 'TASK-002.md'
+        write = partial(roadrunner.write_work_log, {'id': 'TASK-002'}, [])
+    elif writer == 'reset marker':
+        target = tmp_project / '.reset_TASK-002'
+        write = partial(roadrunner.write_reset_marker, 'TASK-002', 'Reset request')
+    elif writer == 'snapshot':
+        target = tmp_project / '.context_snapshot.json'
+        write = roadrunner.write_context_snapshot
+    elif writer == 'init':
+        target = tmp_project / 'generated' / 'tasks' / 'tasks.yaml'
+        write = partial(roadrunner.cmd_init, argparse.Namespace(target_dir=str(target.parents[1])))
+    else:
+        target = rr_session.CURRENT_POINTER
+        write = rr_session.open_session
+
+    previous = 'Existing content' if writer in ('work log', 'reset marker', 'snapshot') else None
+    if previous is not None:
+        target.write_text(previous)
+
+    replace = os.replace
+
+    def interrupt_publish(source, destination):
+        if Path(destination) == target:
+            assert Path(source).read_text()
+            raise OSError('Interrupted publish')
+        return replace(source, destination)
+
+    monkeypatch.setattr(os, 'replace', interrupt_publish)
+    with pytest.raises(OSError, match='Interrupted publish'):
+        write()
+    assert (target.read_text() if target.exists() else None) == previous
 
 
 # ── Schema validation ────────────────────────────────────────────────────────

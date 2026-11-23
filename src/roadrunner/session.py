@@ -37,7 +37,6 @@ from __future__ import annotations
 import codecs
 import gzip
 import json
-import os
 import zlib
 import subprocess
 import uuid
@@ -48,7 +47,7 @@ from typing import Any, TypedDict, cast
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-from .state import resolve_project_root
+from .state import atomic_write_text, resolve_project_root
 
 ROOT = resolve_project_root()
 LOGS_DIR = ROOT / "logs"
@@ -85,18 +84,8 @@ def _ensure_dir() -> None:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write JSON atomically: tmp + fsync + os.replace.
-
-    Same discipline as ``rr_state.write_state`` — never leave a half-written
-    file behind if the process crashes mid-write.
-    """
     _ensure_dir()
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
 def _iso_for_filename(iso: str) -> str:
@@ -321,7 +310,7 @@ def open_session() -> Path:
     }
     path = _shell_path_for(started_at, session_id)
     _atomic_write_json(path, dict(shell))
-    CURRENT_POINTER.write_text(str(path))
+    atomic_write_text(CURRENT_POINTER, str(path))
     return path
 
 

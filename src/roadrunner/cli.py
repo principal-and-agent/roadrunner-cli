@@ -10,6 +10,7 @@ Hooks own: stop enforcement, completion gating, context snapshots.
 import argparse
 import gzip
 import json
+import math
 import os
 import re
 import shutil
@@ -31,7 +32,7 @@ from . import session as rr_session  # session summary observability (Issue 6)
 # schema versioning) has its own blast radius. See Issue 5 of the 2026-04-24
 # resolution plan. The names below are re-exported so the public
 # ``roadrunner`` import surface is unchanged.
-from .state import resolve_project_root
+from .state import atomic_write_text, resolve_project_root
 from .state import (  # noqa: F401 — re-exports
     STATE_FILE,
     STATE_LOCK,
@@ -115,6 +116,7 @@ except OSError:
 
 DEFAULT_VALIDATION_TIMEOUT = 300  # seconds; per-task override via validation_timeout in tasks.yaml
 MAX_TASK_ATTEMPTS = 5  # auto-block a task after this many resume cycles without completion
+DEFAULT_MAX_ITERATIONS = 100
 TASKS_BACKUP_KEEP = 5  # number of rolling tasks.yaml.bak.N copies to retain
 LOG_ROTATE_BYTES = 10 * 1024 * 1024  # rotate when a log file exceeds 10 MB
 LOG_RETAIN_DAYS = 7  # delete rotated/compressed logs older than this
@@ -237,19 +239,18 @@ def _extract_session_cost_usd(payload: dict) -> float | None:
 def _resolve_max_budget_usd(arg_value: Any) -> float | None:
     """Resolve --max-budget-usd from the CLI flag, falling back to the
     ``ROADMAP_MAX_BUDGET_USD`` environment variable. Returns ``None`` when
-    the feature is disabled (neither source set). Non-numeric values are
-    treated as disabled so a typo doesn't silently halt the loop.
+    neither source supplies a positive finite budget.
     """
-    candidates: tuple[Any, ...] = (arg_value, os.environ.get("ROADMAP_MAX_BUDGET_USD"))
-    for raw in candidates:
+    for source, raw in (("--max-budget-usd", arg_value), ("ROADMAP_MAX_BUDGET_USD", os.environ.get("ROADMAP_MAX_BUDGET_USD"))):
         if raw is None or raw == "":
             continue
         try:
             value = float(raw)
         except (TypeError, ValueError):
-            continue
-        if value > 0:
+            value = 0.0
+        if math.isfinite(value) and value > 0:
             return value
+        print(f"[roadrunner] Ignoring invalid {source}; budget must be a positive finite number.", file=sys.stderr)
     return None
 
 
@@ -1100,23 +1101,25 @@ def write_work_log(task: Task, validation_results: list[ValidationResult], notes
             # entire existing content as prose, then add the marker +
             # auto block as a new appended section.
             head = existing.rstrip()
-        log_path.write_text(head + "\n\n" + WORK_LOG_MARKER + "\n\n" + auto_block + "\n")
+        content = head + "\n\n" + WORK_LOG_MARKER + "\n\n" + auto_block + "\n"
     else:
         # No prior file — write the canonical template. The H1 lives ABOVE
         # the marker so a future hand-edit of the title is preserved across
         # subsequent complete/block runs.
         header = f"# Work Log: {task['id']} — {task.get('title', '')}\n"
-        log_path.write_text(header + "\n" + WORK_LOG_MARKER + "\n\n" + auto_block + "\n")
+        content = header + "\n" + WORK_LOG_MARKER + "\n\n" + auto_block + "\n"
+    atomic_write_text(log_path, content)
 
 
 def write_reset_marker(task_id: str, summary: str) -> None:
     marker = ROOT / f".reset_{task_id}"
-    marker.write_text(
+    atomic_write_text(
+        marker,
         json.dumps(
             {"task_id": task_id, "summary": summary, "at": _now()},
             indent=2,
             ensure_ascii=False,
-        )
+        ),
     )
 
 
@@ -1134,7 +1137,7 @@ def write_context_snapshot() -> None:
         "next_eligible": next_task["id"] if next_task else None,
         "status_summary": {t["id"]: t["status"] for t in tasks},
     }
-    (ROOT / ".context_snapshot.json").write_text(json.dumps(snapshot, indent=2, ensure_ascii=False))
+    atomic_write_text(ROOT / ".context_snapshot.json", json.dumps(snapshot, indent=2, ensure_ascii=False))
 
 
 # ── CLI commands ──────────────────────────────────────────────────────────────
@@ -1205,43 +1208,44 @@ def cmd_next(args: argparse.Namespace) -> None:
 
 
 def cmd_start(args: argparse.Namespace) -> None:
-    tasks = load_tasks()
-    task = get_task(tasks, args.task_id)
-    if not task:
-        print(f"Task {args.task_id} not found.")
-        sys.exit(1)
-    if not is_eligible(task, tasks):
-        print(f"Task {args.task_id} is not eligible (status={task.get('status')}, check deps).")
-        sys.exit(1)
+    with _exclusive_state_lock():
+        tasks = load_tasks()
+        task = get_task(tasks, args.task_id)
+        if not task:
+            print(f"Task {args.task_id} not found.")
+            sys.exit(1)
+        if not is_eligible(task, tasks):
+            print(f"Task {args.task_id} is not eligible (status={task.get('status')}, check deps).")
+            sys.exit(1)
 
-    if active_task(tasks):
-        raise ValueError("An active task already exists")
-    state = read_state()
-    attempts = state.get("attempts_per_task", {}).copy()
-    attempts[args.task_id] = 0
-    # Record base branch before creating task branch. Prefer the configured
-    # project_base from tasks.yaml over _current_branch() to avoid stacking
-    # task branches on top of previous task branches (ROAD-025).
-    base_branch = get_project_base()
-    validation = _validation_definition(task)
-    branched = create_task_branch(args.task_id, base_branch=base_branch)
-    if _is_git_repo() and not branched:
-        raise ValueError("Task branch preparation failed; task was not started")
-    task["status"] = "in_progress"
-    save_tasks(tasks)
-    write_state(
-        args.task_id,
-        state.get("iteration", 0),
-        attempts,
-        extra={"base_branch": base_branch, "active_validation": validation},
-    )
-    append_changelog(args.task_id, "in_progress")
-    trace_event(
-        "task_start",
-        task_id=args.task_id,
-        iteration=state.get("iteration", 0),
-        extra={"base_branch": base_branch, "branched": branched},
-    )
+        if active_task(tasks):
+            raise ValueError("An active task already exists")
+        state = read_state()
+        attempts = state.get("attempts_per_task", {}).copy()
+        attempts[args.task_id] = 0
+        # Record base branch before creating task branch. Prefer the configured
+        # project_base from tasks.yaml over _current_branch() to avoid stacking
+        # task branches on top of previous task branches (ROAD-025).
+        base_branch = get_project_base()
+        validation = _validation_definition(task)
+        branched = create_task_branch(args.task_id, base_branch=base_branch)
+        if _is_git_repo() and not branched:
+            raise ValueError("Task branch preparation failed; task was not started")
+        task["status"] = "in_progress"
+        save_tasks(tasks)
+        write_state(
+            args.task_id,
+            state.get("iteration", 0),
+            attempts,
+            extra={"base_branch": base_branch, "active_validation": validation},
+        )
+        append_changelog(args.task_id, "in_progress")
+        trace_event(
+            "task_start",
+            task_id=args.task_id,
+            iteration=state.get("iteration", 0),
+            extra={"base_branch": base_branch, "branched": branched},
+        )
     branch_msg = f" (branch: {task_branch_name(args.task_id)})" if branched else ""
     print(f"Started {args.task_id}. Iteration {state.get('iteration', 0)}.{branch_msg}")
 
@@ -1259,7 +1263,7 @@ def _failure_summary(results: list[ValidationResult], keep: int = 600) -> str:
 
 
 def _record_failure_signature(task_id: str, passed: bool, results: list[ValidationResult]) -> None:
-    """Persist the failure/diff signature (issue #19). Cleared on success."""
+    """Persist the failure/diff signature while the caller holds the state lock."""
     from roadrunner import failure_sig as fs
 
     state = read_state()
@@ -1290,7 +1294,8 @@ def cmd_validate(args: argparse.Namespace) -> None:
 
     trace_event("validate_start", task_id=args.task_id)
     passed, results = run_validation(task)
-    _record_failure_signature(args.task_id, passed, results)
+    with _exclusive_state_lock():
+        _record_failure_signature(args.task_id, passed, results)
     # ROAD-015: split results into baseline/task suites so the operator can
     # see at a glance which phase failed. Baseline failures are gate failures
     # (CI parity violation); task-specific failures are scope-specific to the
@@ -1329,15 +1334,14 @@ def cmd_validate(args: argparse.Namespace) -> None:
     sys.exit(0 if passed else 1)
 
 
-def cmd_complete(args: argparse.Namespace) -> None:
+def _completion_task(task_id: str, state: RoadmapState) -> tuple[list[Task], Task, ValidationDefinition]:
     tasks = load_tasks()
-    task = get_task(tasks, args.task_id)
+    task = get_task(tasks, task_id)
     if not task:
-        print(f"Task {args.task_id} not found.")
+        print(f"Task {task_id} not found.")
         sys.exit(1)
 
-    state = read_state()
-    if task.get("status") != "in_progress" or state.get("current_task_id") != args.task_id:
+    if task.get("status") != "in_progress" or state.get("current_task_id") != task_id:
         raise ValueError("Completion requires the current active task")
     if any(not (prerequisite := get_task(tasks, dep)) or prerequisite.get("status") != "done"
            for dep in task.get("depends_on", [])):
@@ -1352,59 +1356,78 @@ def cmd_complete(args: argparse.Namespace) -> None:
         raise ValueError("Validation definition changed since start. Restore the original validation settings and retry.")
     if not validation["commands"] and not validation["baseline"]:
         raise ValueError("Completion requires validation commands")
-    passed, results = run_validation(task, validation)
-    _record_failure_signature(args.task_id, passed, results)
-    if not passed:
-        print(f"Validation failed. Task {args.task_id} NOT marked done.")
-        write_work_log(task, results, notes=args.notes or "")
-        sys.exit(1)
+    return tasks, task, validation
 
-    base_branch = state.get("base_branch", "main")
-    merged = merge_task_branch(args.task_id, base_branch)
-    if not merged:
-        raise ValueError("Integration failed; task remains unfinished. Repair the task branch and retry.")
-    task["status"] = "done"
-    save_tasks(tasks)
-    write_work_log(task, results, notes=args.notes or "")
-    append_changelog(args.task_id, "done", notes=args.notes or "")
-    write_reset_marker(args.task_id, summary=args.notes or "Completed.")
-    state = read_state()
-    # Clear current_task_id so SessionStart / check_stop don't read a stale
-    # "resume this done task" pointer on the next fire. Preserve iteration,
-    # attempts, and base_branch for continuity.
-    write_state(
-        None,
-        state.get("iteration", 0),
-        state.get("attempts_per_task", {}),
-        extra={"active_validation": None},
-    )
-    trace_event(
-        "task_complete",
-        task_id=args.task_id,
-        iteration=state.get("iteration"),
-        extra={"merged": merged},
-    )
+
+def cmd_complete(args: argparse.Namespace) -> None:
+    with _exclusive_state_lock():
+        _, task, validation = _completion_task(args.task_id, read_state())
+
+    # Validation can run external commands for minutes. Let Stop keep updating
+    # counters while it runs, then recheck the roadmap before integrating.
+    passed, results = run_validation(task, validation)
+    with _exclusive_state_lock():
+        state = read_state()
+        tasks, task, current_validation = _completion_task(args.task_id, state)
+        if current_validation != validation:
+            raise ValueError("Validation definition changed while completing the task. Retry completion.")
+        _record_failure_signature(args.task_id, passed, results)
+        if not passed:
+            print(f"Validation failed. Task {args.task_id} NOT marked done.")
+            write_work_log(task, results, notes=args.notes or "")
+            sys.exit(1)
+
+        base_branch = state.get("base_branch", "main")
+        merged = merge_task_branch(args.task_id, base_branch)
+        if not merged:
+            raise ValueError("Integration failed; task remains unfinished. Repair the task branch and retry.")
+        task["status"] = "done"
+        save_tasks(tasks)
+        write_state(
+            None,
+            state.get("iteration", 0),
+            state.get("attempts_per_task", {}),
+            extra={"active_validation": None},
+        )
+        write_work_log(task, results, notes=args.notes or "")
+        append_changelog(args.task_id, "done", notes=args.notes or "")
+        write_reset_marker(args.task_id, summary=args.notes or "Completed.")
+        trace_event(
+            "task_complete",
+            task_id=args.task_id,
+            iteration=state.get("iteration"),
+            extra={"merged": merged},
+        )
     print(f"✅ {args.task_id} marked done.")
 
 
 def cmd_block(args: argparse.Namespace) -> None:
-    tasks = load_tasks()
-    task = get_task(tasks, args.task_id)
-    if not task:
-        print(f"Task {args.task_id} not found.")
-        sys.exit(1)
+    with _exclusive_state_lock():
+        tasks = load_tasks()
+        task = get_task(tasks, args.task_id)
+        if not task:
+            print(f"Task {args.task_id} not found.")
+            sys.exit(1)
 
-    task["status"] = "blocked"
-    save_tasks(tasks)
-    append_changelog(args.task_id, "blocked", notes=args.notes or "")
-    write_work_log(task, [], notes=args.notes or "")
-    state = read_state()
-    trace_event(
-        "task_block",
-        task_id=args.task_id,
-        iteration=state.get("iteration"),
-        extra={"notes": args.notes or ""},
-    )
+        from_status = task["status"]
+        state = read_state()
+        if from_status == "done":
+            trace_event(
+                "task_block_rejected", task_id=args.task_id, iteration=state.get("iteration"), extra={"from_status": from_status},
+            )
+            print(f"Cannot block {args.task_id}: task is already done.", file=sys.stderr)
+            sys.exit(1)
+
+        task["status"] = "blocked"
+        save_tasks(tasks)
+        append_changelog(args.task_id, "blocked", notes=args.notes or "")
+        write_work_log(task, [], notes=args.notes or "")
+        trace_event(
+            "task_block",
+            task_id=args.task_id,
+            iteration=state.get("iteration"),
+            extra={"notes": args.notes or "", "from_status": from_status},
+        )
     print(f"🚫 {args.task_id} marked blocked.")
 
 
@@ -1826,9 +1849,9 @@ def cmd_watch(args: argparse.Namespace) -> None:
     interval = max(0.5, float(args.interval))  # floor: --interval 0 must not busy-loop
     max_iter_env = os.environ.get("ROADMAP_MAX_ITERATIONS")
     try:
-        max_iter = int(max_iter_env) if max_iter_env else 100
+        max_iter = int(max_iter_env) if max_iter_env else DEFAULT_MAX_ITERATIONS
     except ValueError:
-        max_iter = 100
+        max_iter = DEFAULT_MAX_ITERATIONS
 
     try:
         while True:
@@ -1887,7 +1910,11 @@ def cmd_check_stop(args: argparse.Namespace) -> None:
         iteration = state.get("iteration", 0) + 1
         session_iteration = state.get("session_iteration", 0) + 1
         attempts = state.get("attempts_per_task", {})
-        max_iter = int(args.max_iterations) if args.max_iterations else 100
+        try:
+            max_iter = int(args.max_iterations) if args.max_iterations else DEFAULT_MAX_ITERATIONS
+        except ValueError:
+            max_iter = DEFAULT_MAX_ITERATIONS
+            print(f"[roadrunner] Invalid ROADMAP_MAX_ITERATIONS or --max-iterations; using {max_iter}.", file=sys.stderr)
         max_attempts = int(args.max_attempts) if args.max_attempts else MAX_TASK_ATTEMPTS
 
         # ROAD-011: pull per-session cost out of the Stop-hook payload. If the
@@ -2378,7 +2405,7 @@ def cmd_init(args: argparse.Namespace) -> None:
             if dry_run:
                 print(f"{prefix}write  {rel}")
             else:
-                dest.write_text(content or "", encoding="utf-8")
+                atomic_write_text(dest, content or "")
                 print(f"write  {rel}")
             created.append(str(rel))
         elif kind == "copy":
@@ -2828,7 +2855,7 @@ def main() -> None:
 
     p_stop = sub.add_parser("check-stop")
     # ROAD-010: session-iteration cap default raised from 50 → 100.
-    p_stop.add_argument("--max-iterations", default="100")
+    p_stop.add_argument("--max-iterations", default=str(DEFAULT_MAX_ITERATIONS))
     p_stop.add_argument("--max-attempts", default=str(MAX_TASK_ATTEMPTS))
     # ROAD-011: per-session USD budget cap. Falls back to ROADMAP_MAX_BUDGET_USD
     # env var when the flag is absent; feature disabled when both are unset.
