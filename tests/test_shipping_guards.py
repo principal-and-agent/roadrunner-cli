@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -109,6 +110,73 @@ def test_packaged_scaffold_assets():
     scaffold = SOURCE / 'src/roadrunner/scaffold'
     assert (scaffold / '.claude/settings.json').is_file()
     assert (scaffold / 'hooks/stop_hook.sh').read_bytes() == (SOURCE / 'hooks/stop_hook.sh').read_bytes()
+
+
+def run_registered_roadmap_guard(project, tool, file_path, *, cwd=None):
+    settings = json.loads((project / '.claude/settings.json').read_text())
+    hooks = [hook for hook in settings['hooks']['PreToolUse'] if re.fullmatch(hook['matcher'], tool)]
+    assert len(hooks) == 1
+    command, = hooks[0]['hooks']
+    assert command['type'] == 'command'
+    payload = {'hook_event_name': 'PreToolUse', 'tool_name': tool,
+               'cwd': str(cwd or project), 'tool_input': {'file_path': str(file_path)}}
+    return subprocess.run(
+        ['bash', '-c', command['command']], input=json.dumps(payload), text=True, capture_output=True,
+        cwd=cwd or project, env=dict(os.environ, CLAUDE_PROJECT_DIR=str(project)),
+    )
+
+
+@pytest.mark.parametrize('scaffolded', [False, True], ids=['repository', 'init-scaffold'])
+def test_configured_pretool_hook_protects_only_the_roadmap(project, scaffolded):
+    if scaffolded:
+        target = project / 'generated project'
+        result = invoke(project, 'init', str(target))
+        assert result.returncode == 0, result.stderr
+        project = target
+    else:
+        (project / '.claude').mkdir()
+        shutil.copy2(SOURCE / '.claude/settings.json', project / '.claude/settings.json')
+
+    roadmap = project / 'tasks/tasks.yaml'
+    original = roadmap.read_bytes()
+    alias = project / 'roadmap-link.yaml'
+    alias.symlink_to(roadmap)
+    source = project / 'src'
+    source.mkdir()
+    for relative_path in ('src/tasks.yaml', 'src/main.py'):
+        (project / relative_path).touch()
+
+    for tool in ('Write', 'Edit'):
+        for path in (roadmap, 'tasks/tasks.yaml', alias):
+            result = run_registered_roadmap_guard(project, tool, path)
+            assert result.returncode == 2, (path, result.stderr)
+            assert 'roadrunner start' in result.stderr
+            assert 'roadrunner complete' in result.stderr
+        result = run_registered_roadmap_guard(project, tool, '../tasks/tasks.yaml', cwd=source)
+        assert result.returncode == 2, result.stderr
+        for path in (source / 'tasks.yaml', 'src/tasks.yaml', 'src/main.py'):
+            result = run_registered_roadmap_guard(project, tool, path)
+            assert result.returncode == 0, (path, result.stderr)
+    assert roadmap.read_bytes() == original
+
+
+def test_cli_can_update_the_guarded_roadmap(project):
+    (project / '.claude').mkdir()
+    shutil.copy2(SOURCE / '.claude/settings.json', project / '.claude/settings.json')
+    initialize_git(project)
+    roadmap = project / 'tasks/tasks.yaml'
+    assert run_registered_roadmap_guard(project, 'Edit', roadmap).returncode == 2
+
+    result = invoke(project, 'start', 'TASK-001')
+    assert result.returncode == 0, result.stderr
+    assert yaml.safe_load(roadmap.read_text())['tasks'][0]['status'] == 'in_progress'
+
+    (project / 'result').write_text('task change')
+    git(project, 'add', 'result')
+    git(project, 'commit', '-m', 'task change')
+    result = invoke(project, 'complete', 'TASK-001')
+    assert result.returncode == 0, result.stderr
+    assert yaml.safe_load(roadmap.read_text())['tasks'][0]['status'] == 'done'
 
 
 @pytest.mark.parametrize(('scope', 'field', 'changed'), [

@@ -127,6 +127,12 @@ PreCompact does not support `additionalContext` — restoration after compaction
 
 **Behavior:** lint feedback to Claude on the next turn. `.py` files → `ruff check`; `.yaml`/`.yml` → safe-load validation (path passed via `argv`, never interpolated). Non-blocking.
 
+### 2.6 PreToolUse (`hooks/protect_roadmap_hook.sh`)
+
+**Fires:** before Claude uses Write or Edit. Matcher: `"Write|Edit"`.
+
+**Behavior:** exits 2 when the tool targets this project's `tasks/tasks.yaml`, so Claude Code blocks the operation before writing. Status updates use `roadrunner start`, `roadrunner complete`, or `roadrunner block`. The hook is registered in the project settings shipped by `roadrunner init`.
+
 ---
 
 ## 3. Trust Boundary

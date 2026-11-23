@@ -25,6 +25,7 @@
       ]                                        
     },                                                                                                                                                                                                                                                                     
     "hooks": {
+      "PreToolUse": [{"matcher": "Write|Edit", "hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/hooks/protect_roadmap_hook.sh", "timeout": 10}]}],
       "Stop": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/hooks/stop_hook.sh", "timeout": 30}]}],
       "SessionStart": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/hooks/session_start_hook.sh", "timeout": 10}]}],                                                                                                                              
       "PreCompact": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/hooks/precompact_hook.sh", "timeout": 30}]}],
