@@ -4,10 +4,9 @@
 
 ## Checklist
 
-- [ ] `python3 -m pytest` passes locally
-- [ ] `ruff check .` is clean
-- [ ] `mypy .` reports no new errors
-- [ ] `CHANGELOG.md` updated under `[Unreleased]` if this is user-facing
+- [ ] `just ci` passed, or the test plan explains the checks run
+- [ ] `shellcheck hooks/*.sh` passed for hook changes
+- [ ] `CHANGELOG.md` updated under Unreleased if this is user-facing
 - [ ] ADR added under `docs/adr/` if this is an architectural decision
 - [ ] No `.reset_*`, `.roadmap_state*`, or other runtime artifacts staged
 

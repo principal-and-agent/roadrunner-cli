@@ -15,8 +15,7 @@ What should have happened instead.
 
 **Reproduction**
 
-Minimal steps to reproduce. Include the relevant slice of `tasks/tasks.yaml`
-if the bug involves task scheduling or validation.
+List the command, workflow (supervised run or interactive hooks), and minimal steps to reproduce. Include the relevant plan, policy, or roadmap fields when scheduling or validation is involved.
 
 **Environment**
 
@@ -26,5 +25,4 @@ if the bug involves task scheduling or validation.
 
 **Logs**
 
-Paste the relevant lines from `logs/trace.jsonl` and `logs/CHANGELOG.md`.
-Redact anything sensitive.
+For a supervised run, include the run ID, task phase, reason, and relevant attempt or validation output. For the hook loop, include the relevant `logs/trace.jsonl` lines. Redact sensitive data. Report vulnerabilities privately using [the security policy](https://github.com/principal-and-agent/roadrunner-cli/blob/main/SECURITY.md).
