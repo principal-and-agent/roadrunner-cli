@@ -1,27 +1,24 @@
 # hello-roadrunner
 
-Three-task demo of the full roadrunner loop. Claude builds a tiny
-`word_counter` CLI: function → CLI entry → tests.
+A three-task example for the [interactive Claude hook workflow](../../WORKFLOW.md#claude-hook-workflow). Claude adds a word-counting function, a command-line entry point, and tests in dependency order.
 
 ## Run it
 
-```bash
-cp -r docs/examples/hello-roadrunner ~/hello-roadrunner
-cd ~/hello-roadrunner
-pip install roadrunner-cli
-roadrunner init .              # adds roadrunner.py + hooks/ + .claude/
-roadrunner status   # DEMO-001/002/003 all `todo`
-roadrunner analyze  # validates YAML + dep graph
-claude                         # launch the loop
+Install Roadrunner from source using the [repository README](../../../README.md). With the same virtual environment active, run the following from the repository root. Choose a new demo directory.
+
+```sh
+python -m pip install pytest
+cp -R docs/examples/hello-roadrunner "$HOME/hello-roadrunner"
+cd "$HOME/hello-roadrunner"
+git init -b main
+roadrunner init .
+git add CLAUDE.md README.md tasks .claude hooks
+git commit -m "Initialize the Roadrunner hook demo"
+roadrunner analyze
+roadrunner status
+claude
 ```
 
-The Stop hook feeds Claude DEMO-001, validates, injects DEMO-002, repeats.
-When DEMO-003 lands the loop emits `ROADMAP_COMPLETE` and halts.
+Review the project-level settings when Claude asks to trust the project. The generated settings register the hooks while preserving the supplied example roadmap and agent instructions. The Stop hook supplies task briefs and resumes active work. Completion reruns validation and merges each task into `main` before recording it as done.
 
-## What you get
-
-`word_counter.py`, `test_word_counter.py`, `logs/DEMO-00X.md`,
-`logs/trace.jsonl`, and a git branch per task.
-
-See [`tasks/tasks.yaml`](tasks/tasks.yaml) for the three tasks and their
-validation commands.
+Inspect `word_counter.py`, `test_word_counter.py`, `logs/trace.jsonl`, and the task work logs. The [example roadmap](tasks/tasks.yaml) defines each task's scope and validation.

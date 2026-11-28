@@ -1,10 +1,74 @@
-# Roadrunner Configuration
+# Configuration reference
 
-This document covers every knob Roadrunner exposes: module-level tunables,
-environment variables, the `tasks.yaml` schema, and the two on-disk state
-files (`.roadmap_state.json` and `.context_snapshot.json`).
+Use the supervisor's reviewed JSON policy for `roadrunner run`. The interactive Claude hook workflow has its own [roadmap and settings](#claude-hook-configuration).
 
-## Tunables
+## Supervised plans
+
+`roadrunner sync --roadmap PATH` accepts a YAML document or a Markdown document with one fenced YAML block containing a `tasks` list. Give each task a stable ID such as `TASK-001`, a title, a goal, measurable `acceptance_criteria`, and repository-relative `files_expected`. Use `depends_on` for task IDs that must resolve first and `priority` to order eligible tasks. Lower priorities run first, with task IDs breaking ties. A missing priority defaults to 100.
+
+`sync` reports the frozen plan's absolute path, source revisions, and dispositions. Use that path as `run --plan`. Synchronization resets imported status and strips source validation commands. The supervisor takes all executable gates from its separately reviewed run policy.
+
+### GitHub intake rules
+
+`sync --github` reads through the authenticated `gh` CLI. Provide an operator-reviewed JSON map keyed by the source IDs reported by sync:
+
+```json
+{
+  "github:OWNER/REPO#123": {
+    "goal": "Normalize whitespace in parser output.",
+    "acceptance_criteria": ["The committed regression test passes."],
+    "files_expected": ["src/parser.py"],
+    "depends_on": [],
+    "priority": 10
+  }
+}
+```
+
+After an issue changes or reopens, review the updated scope. Set `approved_revision` to the revision shown for that item, then sync again. An externally closed issue stays externally closed.
+
+## Supervised run policy
+
+See the [example policy](shipping-run-policy.json) and the [minimal walkthrough](WORKFLOW.md#first-supervised-run). The table lists defaults applied by the controller.
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `adapter` | `claude` | Live Claude worker. The `fixture` adapter is for disposable testing. |
+| `sandbox` | `macos` | Uses macOS `sandbox-exec`. Fixture isolation is available only with the fixture adapter. |
+| `delivery` | `local` | Integrates into a local Git branch. |
+| `validation_commands` | Required | Nonempty list of operator-reviewed shell checks run with network access disabled in macOS isolation. |
+| `protected_paths` | `[]` | Repository-relative files or directories the worker cannot change. Include gate scripts and their supporting fixtures. |
+| `max_attempts` | `3` | Maximum attempts per task. Must be a positive integer. |
+| `attempt_seconds` | `300` | Maximum time per worker attempt. |
+| `validation_seconds` | `120` | Validation deadline in seconds. |
+| `run_seconds` | `1800` | Overall run deadline in seconds. |
+| `max_budget_usd` | `3.0` | Total reservation limit for the run. |
+| `attempt_budget_usd` | `1.0` | Native Claude cap reserved before each attempt. |
+
+Time and budget values must be positive and finite. Dependencies needed by validation must be available before the run. Review the policy and run `roadrunner doctor --policy PATH` with the same environment you intend to use for `run`.
+
+## Delivery policy
+
+Pass a separate JSON file to `roadrunner deliver --run RUN_UUID --policy PATH`:
+
+```json
+{
+  "repository": "OWNER/REPO",
+  "base": "main",
+  "required_checks": ["tests"],
+  "allow_push": false,
+  "allow_pr": false,
+  "allow_merge": false,
+  "allow_close": false
+}
+```
+
+Use exact check names from the target repository. The default invocation prepares an artifact for review. Execution additionally requires `--execute`, authenticated Git and `gh`, and the applicable capabilities set to the JSON boolean `true`. All selected items must have verified local integration. Live GitHub delivery has yet to be qualified.
+
+## Claude hook configuration
+
+The rest of this page covers the interactive hook loop. It uses `tasks/tasks.yaml`, `.roadmap_state.json`, and `.context_snapshot.json`. Its environment variables do not configure the supervisor.
+
+### Hook tunables
 
 All tunables live at the top of `src/roadrunner/cli.py` so operators have a single
 place to adjust retention and safety knobs. Change them in source — there is
@@ -83,11 +147,10 @@ export ROADMAP_MAX_ITERATIONS=50   # tighter cap for a short run
 ```
 
 The env var is read by `hooks/stop_hook.sh` and passed as `--max-iterations` to
-`roadrunner check-stop`. The CLI itself defaults to 100 if the flag is absent.
+`roadrunner check-stop`. The CLI defaults to 100 if the flag is absent or cannot be parsed. A malformed value prints a warning to stderr.
 
 **When the cap fires:** `check-stop` emits a hard halt with `stopReason` explaining
-the cap was hit. The session terminates; Alex's next `claude` invocation starts
-fresh at session iteration 0 (because `SessionStart` resets it).
+the cap was hit. The session terminates. The next session starts at iteration 0 when `SessionStart` resets it.
 
 ## Cost Budget Cap
 
@@ -96,7 +159,7 @@ of turns. The Stop hook reads cumulative per-session cost from Claude Code's
 payload, accumulates it into `session_cost_usd` in `.roadmap_state.json`, and
 hard-halts the loop when the configured cap is met or exceeded.
 
-**Default:** off. A budget halt never fires unless an operator opts in.
+**Default:** off. An invalid setting prints a warning. A valid flag takes precedence over the environment variable.
 
 **Configure (env var):**
 

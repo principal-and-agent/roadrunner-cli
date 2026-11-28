@@ -1,8 +1,8 @@
-# CLAUDE.md — Roadmap Loop Agent Brief
+# CLAUDE.md — Interactive roadmap agent brief
 
 ## Operating Model
 
-You are executing a deterministic roadmap. Python owns control. You own implementation.
+These instructions apply when operating this repository through the interactive Claude hooks. The supervisor supplies its own frozen plan and task brief. Python owns task transitions, and you implement the active task.
 **One task per cycle. No side quests. No skipping ahead.**
 
 ---
@@ -16,7 +16,6 @@ You are executing a deterministic roadmap. Python owns control. You own implemen
 5. Fix any failures — validation commands are the source of truth, not your assessment
 6. Commit the scoped implementation with `roadrunner commit TASK-XXX` before completion.
 7. Run `roadrunner complete TASK-XXX --notes "what you did"` to close the task
-8. Run `roadrunner reset TASK-XXX --summary "one line"` to write the boundary marker
 
 **The Stop hook will determine what comes next. Do not attempt to decide task order yourself.**
 
@@ -53,7 +52,7 @@ Document what is blocking. Do not keep retrying indefinitely.
 
 ## Validation Is the Gate
 
-Validation is necessary. Completion also requires the active task, satisfied dependencies, and successful Git integration. The legacy hook workflow is not an isolated autonomous supervisor.
+Validation is necessary. Completion also requires the active task, satisfied dependencies, and successful Git integration. Start pins the validation definition, and complete reruns it before integration. The roadmap guard denies Claude Write and Edit operations on `tasks/tasks.yaml`. Use the CLI for status changes.
 
 ---
 
@@ -62,7 +61,7 @@ Validation is necessary. Completion also requires the active task, satisfied dep
 - Work on exactly one task per cycle
 - Do not reference prior task details unless directly relevant to current task
 - After each `complete`, treat the prior task as closed
-- On session start, the SessionStart hook injects a roadmap snapshot automatically
+- On session start, the SessionStart hook builds a brief from the live roadmap
 - The `.context_snapshot.json` and `.roadmap_state.json` are your memory — read them if the snapshot seems stale
 - When you discover a non-obvious project fact during a task (unusual build command, flaky test, env var the script silently requires, file that moved), append a one-line entry to `logs/learnings.md` in the form `YYYY-MM-DD — terse fact`. The SessionStart hook surfaces the last 20 entries to the next session. Append-only; never edit prior entries.
 

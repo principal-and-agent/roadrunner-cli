@@ -8,9 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The internal per-task audit trail lives in [`logs/CHANGELOG.md`](logs/CHANGELOG.md);
 > this file is the release-facing summary.
 
-## [Unreleased]
+## Unreleased
 
 ### Added
+
+- **Supervised local delivery** — freeze a reviewed plan with `sync`, preflight with `doctor`, and execute tasks in isolated worktrees with `run`. The controller validates and integrates changes into a dedicated run branch while preserving the operator checkout.
+- **Optional GitHub delivery** — prepare a delivery artifact locally or explicitly execute the permitted operations after review. Live remote writes have yet to be qualified.
+- **Interactive roadmap guard** — the project and the installed scaffold block Claude Write and Edit calls targeting `tasks/tasks.yaml` ([#48](https://github.com/principal-and-agent/roadrunner-cli/pull/48)).
 
 - **Coverage floor (#18)** — a task no longer passes validation on checks that
   verified nothing. Commands that are bare no-ops (`true`, `echo`, ...) or test
@@ -112,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Interactive loop state and validation** — pin validation from start through completion, serialize task transitions with Stop, warn and recover from malformed session limits, publish work files atomically, and refuse to block a completed task ([#40](https://github.com/principal-and-agent/roadrunner-cli/issues/40)).
+
 - Restored the original roadrunner banner at the top of the repository README.
 - Stale references to `docs/resolution-plan-2026-04-24.md` (file no
   longer in the working tree) scrubbed from
@@ -132,7 +138,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replacing the old `Path(__file__).parent` anchor that worked only when
   the file lived at the project root.
 
-## [1.0.0] - 2026-04-25
+## 1.0.0 - 2026-04-25
 
 ### Added
 
@@ -185,6 +191,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial development. See `git log` for full history before the changelog
 was started.
-
-[Unreleased]: https://github.com/afoxnyc3/roadrunner-cli/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/afoxnyc3/roadrunner-cli/releases/tag/v1.0.0

@@ -9,7 +9,8 @@ You own implementation. **One task per cycle. No side quests. No skipping ahead.
 2. `roadrunner start DEMO-XXX` — creates the task branch, marks `in_progress`.
 3. Implement the task. Stay strictly inside the task's `files_expected`.
 4. `roadrunner validate DEMO-XXX` — every `validation_command` must exit 0.
-5. `roadrunner complete DEMO-XXX --notes "what you did"` — marks done.
+5. Commit the task changes with `roadrunner commit DEMO-XXX`.
+6. `roadrunner complete DEMO-XXX --notes "what you did"` — marks done.
 6. `roadrunner reset DEMO-XXX --summary "one-line"` — boundary marker.
 
 The Stop hook decides what comes next. Do not pick task order yourself.
@@ -29,5 +30,4 @@ should not edit it.
 
 ## Validation is the gate
 
-A task is done when `roadrunner validate DEMO-XXX` exits 0.
-Not when you think it looks right. When validation passes.
+A task is done after `roadrunner complete DEMO-XXX` reruns the pinned checks, integrates the branch, and records the completed status.

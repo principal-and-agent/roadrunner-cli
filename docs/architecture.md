@@ -1,8 +1,33 @@
-# Roadrunner CLI — Architecture
+# Roadrunner architecture
 
-## 1. Overview
+Roadrunner has a supervised workflow for local delivery and an interactive Claude hook workflow. The supervised workflow uses frozen plans and its own run records. The interactive workflow uses the current project roadmap and project-level Claude settings.
 
-Roadrunner is a deterministic agentic loop. **Python owns control.** **Claude owns implementation.** **Hooks enforce completion.** No task advances without validation. No loop exits without an explicit signal.
+## Supervised run
+
+```mermaid
+flowchart LR
+    A["YAML, Markdown, or GitHub issues"] --> B["sync: frozen plan"]
+    B --> C["run: serial controller"]
+    P["Reviewed run policy"] --> C
+    C --> D["Task worktree and Claude worker"]
+    D --> E["Commit, validate, verify"]
+    E --> F["Dedicated local run branch"]
+    C --> G["Run report and actionable blockers"]
+    F --> H["Optional deliver phase"]
+```
+
+- `intake.py` reads a selected backlog, records stable source IDs and revisions, and writes the normalized plan. Issue content contributes task requirements.
+- `supervisor.py` starts from committed HEAD, schedules eligible tasks serially, and owns Git and validation. The live worker gets Claude file tools inside a macOS sandbox. Its writable worktree and scratch directory are separate from the operator checkout and controller metadata. Operator-approved gates run without network access.
+- A task resolves when its validated candidate is integrated onto the run branch and its evidence is recorded. Pending dependencies, missing inputs, failures, and cancellation have explicit outcomes.
+- `delivery.py` prepares a remote delivery plan after checking local evidence. Explicit execution verifies the remote head, required checks, merge tree, and issue source revisions before recording remote outcomes.
+
+Plans, source revisions, and run directories live under `roadrunner/` in the Git common directory. Each run has a frozen policy, `run.json`, logs, attempt records, and integration evidence. The run record gives the path to the temporary task worktrees. Resume reconciles recorded progress under the original deadline and attempt and budget charges.
+
+For platform limits and tested scenarios, see the [qualification checklist](shipping-implementation-checklist.md). For the trust assumptions, see the [security policy](../SECURITY.md).
+
+## 1. Interactive Claude hook loop
+
+Project hooks route Claude lifecycle events to the legacy CLI. The CLI owns task status and Git transitions. Claude implements the scoped changes.
 
 ```text
 ┌────────────────────────── Claude Code Session ──────────────────────────┐
@@ -20,11 +45,11 @@ Roadrunner is a deterministic agentic loop. **Python owns control.** **Claude ow
 
 1. Claude reads its brief from `CLAUDE.md`.
 2. `roadrunner next` → identifies the eligible task.
-3. `roadrunner start TASK-XXX` → status `in_progress`, recorded in state.
+3. `roadrunner start TASK-XXX` → creates the task branch, sets `in_progress`, and pins the validation definition.
 4. Claude implements the task within the scope declared by `files_expected`.
 5. `roadrunner validate TASK-XXX` → runs every `validation_commands` entry. Exit 0 or non-zero.
 6. On failure, fix and retry.
-7. `roadrunner complete TASK-XXX --notes "…"` → re-runs validation, flips to `done`, writes the work log.
+7. `roadrunner complete TASK-XXX --notes "…"` → reruns pinned validation, integrates the task, records `done`, and writes the work log.
 8. Claude finishes its turn. Stop hook fires.
 9. Stop hook calls `roadrunner check-stop` (see §2.1). The hook either lets the session end or injects the next task brief.
 
@@ -50,32 +75,14 @@ Roadrunner is a deterministic agentic loop. **Python owns control.** **Claude ow
 
 **Input (stdin):** Claude Code runtime payload — `stop_hook_active` flag + `last_assistant_message`.
 
-**Output (stdout):** JSON control object. Two distinct shapes:
+**Output:** exit 0 with a JSON decision or an empty body. A soft block such as `{"decision":"block","reason":"Continue working"}` supplies the next instruction. A hard halt such as `{"continue":false,"stopReason":"Max iterations reached"}` ends the loop.
 
-```json
-// Soft block — keep the loop running. Used for resume briefs, next-task
-// briefs, blocked-task reports, and "all done, please emit ROADMAP_COMPLETE".
-{"decision": "block", "reason": "Continue working. Task TASK-002 …"}
+1. The shell wrapper exits silently if the project is paused.
+2. The controller advances the lifetime and session counters and checks budget and iteration limits. An unreadable task queue produces a controlled halt.
+3. `stop_hook_active` allows a silent stop when no task is active or eligible. A final standalone `ROADMAP_COMPLETE` signal is accepted when every task is done.
+4. Otherwise the controller resumes the active task, auto-blocks work that exhausts its allowance or repeats the same failure, or emits the next task brief. It reports remaining blockers when no task can proceed.
 
-// Hard stop — terminate the session entirely with stopReason. Used only
-// when the iteration cap is reached.
-{"continue": false, "stopReason": "Max iterations (50) reached."}
-```
-
-`{"continue": false}` overrides any `decision: "block"`. Never emit both in the same payload.
-
-**Exit codes:** `exit 0` is the norm; the JSON on stdout carries the decision. The hook also exits 0 with no JSON in three cases: `stop_hook_active=true`, `ROADMAP_COMPLETE` matched on the last non-empty line, or after printing the iteration-cap payload.
-
-**Logic** (delegated to `roadrunner check-stop`):
-
-1. `stop_hook_active=true` → exit 0.
-2. Increment iteration counter; check against the cap.
-3. `ROADMAP_COMPLETE` on the last non-empty line of the last assistant message → exit 0 (ADR-001).
-4. In-progress task → emit a resume brief (auto-block after 5 attempts; ADR-003).
-5. Eligible `todo` task → emit a task brief.
-6. Blocked tasks → report with unblock instructions.
-7. Non-`done` tasks remain → report anomaly.
-8. All `done` → prompt Claude to emit `ROADMAP_COMPLETE`.
+Start, completion, and block serialize task transitions with Stop using the same state lock. Completion releases the lock while validation runs and rechecks the active task before integration.
 
 ### 2.2 SessionStart (`hooks/session_start_hook.sh`)
 
@@ -135,7 +142,7 @@ PreCompact does not support `additionalContext` — restoration after compaction
 
 ---
 
-## 3. Trust Boundary
+## 3. Hook workflow trust boundary
 
 `tasks.yaml` is **executable configuration**. The `validation_commands` list is run via `subprocess.run(cmd, shell=True)` — every command runs with the operator's full privileges. This is by design for a single-operator tool: the operator authors the tasks, the operator trusts the commands.
 

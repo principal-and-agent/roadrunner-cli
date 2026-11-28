@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "roadrunner-cli"
 version = "1.1.0rc1"
-description = "Deterministic agentic loop controller for Claude Code — Python owns the roadmap, Claude owns the implementation."
+description = "Run reviewed backlogs with Claude Code, validate changes, and integrate into a local Git branch."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -45,10 +45,10 @@ dev = [
 roadrunner = "roadrunner.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/afoxnyc3/roadrunner-cli"
-Repository = "https://github.com/afoxnyc3/roadrunner-cli"
-Issues = "https://github.com/afoxnyc3/roadrunner-cli/issues"
-Changelog = "https://github.com/afoxnyc3/roadrunner-cli/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/principal-and-agent/roadrunner-cli"
+Repository = "https://github.com/principal-and-agent/roadrunner-cli"
+Issues = "https://github.com/principal-and-agent/roadrunner-cli/issues"
+Changelog = "https://github.com/principal-and-agent/roadrunner-cli/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
